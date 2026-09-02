@@ -24,6 +24,7 @@ from typing import Any, Literal, Protocol
 
 from telegram_bot.core.services.cc_events import StreamEvent, _tool_status
 from telegram_bot.core.services.codex_mcp import build_codex_mcp_config_args
+from telegram_bot.core.services.topic_config import normalize_model_override
 from telegram_bot.core.tui.modal_detect import is_modal_present as _claude_is_modal_present
 from telegram_bot.core.tui.paths import _SESSION_ID_RE
 from telegram_bot.core.tui.paths import transcript_path as _claude_transcript_path
@@ -600,20 +601,96 @@ class CodexAdapter:
         return _fmt(raw_pane)
 
 
+# ---------------------------------------------------------------------------
+# Shared Claude binary resolution + flag policy (bot also uses these helpers
+# from tmux run paths for which there is no TUI adapter instance).
+# ---------------------------------------------------------------------------
+
+# Managed corporate binaries, in preference order. The first found wins.
+MANAGED_CLAUDE_BINARIES = ("tcloud", "tclaude")
+
+
+def resolve_claude_binary() -> str:
+    """Resolve the CLI binary (managed build preferred, vanilla fallback)."""
+    for candidate in MANAGED_CLAUDE_BINARIES:
+        if found := shutil.which(candidate):
+            return str(found)
+    if found := shutil.which("claude"):
+        return str(found)
+    return "claude"
+
+
+def is_managed_claude_binary(binary: str) -> bool:
+    """True when `binary` resolves to a corporate managed build."""
+    return Path(binary).name in MANAGED_CLAUDE_BINARIES
+
+
+def _claude_model_flag(model: str | None) -> list[str]:
+    """`--model` argv fragment, empty when the topic pins no model."""
+    normalized = normalize_model_override(model)
+    return ["--model", normalized] if normalized else []
+
+
+def claude_permission_flags(binary: str) -> list[str]:
+    """Permission bootstrap flags for `binary`.
+
+    The corporate managed build runs under a signed permission policy:
+    `--dangerously-skip-permissions` is disabled at launch, and the
+    in-process teammate mode is out of scope. Only `--permission-mode
+    bypassPermissions` is emitted for those; vanilla gets the full set.
+    """
+    if is_managed_claude_binary(binary):
+        return ["--permission-mode", "bypassPermissions"]
+    return [
+        "--permission-mode",
+        "bypassPermissions",
+        "--dangerously-skip-permissions",
+        "--teammate-mode",
+        "in-process",
+    ]
+
+
+def claude_mcp_config_flags(binary: str, mcp_config: str | None) -> list[str]:
+    """`--mcp-config <path> --strict-mcp-config` for vanilla claude only.
+
+    The corporate managed build is governed by a signed MCP allowlist:
+    `.mcp.bot.json` registers a `bot` server the policy blocks on startup,
+    which hangs the session-boot prompt and makes every spawn die on the
+    tail-watch timeout. Skip the config entirely for those binaries so
+    sessions stay alive.
+    """
+    if is_managed_claude_binary(binary):
+        return []
+    if mcp_config and Path(mcp_config).exists():
+        return ["--mcp-config", mcp_config, "--strict-mcp-config"]
+    return []
+
+
 class ClaudeAdapter:
     """Provider adapter for Claude Code CLI.
 
     Claude Code uses JSON stream output with --output-format stream-json.
     Session management via --session-id (new) or --resume (existing).
+
+    Supports the corporate managed Claude build (`tcloud`/`tclaude`)
+    alongside vanilla `claude`: the managed binary is preferred when
+    present, and run-start flags that the signed policy forbids
+    (`--dangerously-skip-permissions`, `--teammate-mode`) are omitted for
+    it. Vanilla binary fallback keeps existing deployments working.
     """
 
     name: Engine = "claude"
 
     def binary(self) -> str:
-        """Return Claude CLI path."""
-        if found := shutil.which("claude"):
-            return str(found)
-        return "claude"
+        """Return Claude CLI path (managed build preferred, vanilla fallback)."""
+        self._resolved_binary = resolve_claude_binary()
+        return self._resolved_binary
+
+    _resolved_binary: str = "claude"
+
+    def _is_managed_binary(self) -> bool:
+        """True when the resolved binary is the corporate managed build."""
+        return is_managed_claude_binary(self.binary())
 
     def build_tui_start(
         self, *, cwd: str, model: str | None = None, mcp_config: str | None = None
@@ -624,18 +701,24 @@ class ClaudeAdapter:
         """
         cmd = [
             self.binary(),
+            *_claude_model_flag(model),
+            *self._bootstrap_flags(),
+        ]
+        cmd += self._mcp_config_flags(mcp_config)
+        return cmd
+
+    def _bootstrap_flags(self) -> list[str]:
+        """Stream flags + permission bootstrap."""
+        return [
             "--output-format",
             "stream-json",
             "--verbose",
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
-            "--teammate-mode",
-            "in-process",
+            *claude_permission_flags(self.binary()),
         ]
-        if mcp_config and Path(mcp_config).exists():
-            cmd.extend(["--mcp-config", mcp_config, "--strict-mcp-config"])
-        return cmd
+
+    def _mcp_config_flags(self, mcp_config: str | None) -> list[str]:
+        """See module docstring of `claude_mcp_config_flags` for the policy."""
+        return claude_mcp_config_flags(self.binary(), mcp_config)
 
     def build_tui_resume(
         self,
@@ -645,22 +728,21 @@ class ClaudeAdapter:
         model: str | None = None,
         mcp_config: str | None = None,
     ) -> list[str]:
-        """Build Claude TUI resume command for an existing session."""
+        """Build Claude TUI resume command for an existing session.
+
+        `--model` is emitted here for the same reason as in
+        `SessionManager.build_tmux_startup_args`: `--resume` otherwise
+        inherits the model recorded in the transcript, which never carries
+        the `[1m]` context-window suffix.
+        """
         cmd = [
             self.binary(),
             "--resume",
             session_id,
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
-            "--teammate-mode",
-            "in-process",
+            *_claude_model_flag(model),
+            *self._bootstrap_flags(),
         ]
-        if mcp_config and Path(mcp_config).exists():
-            cmd.extend(["--mcp-config", mcp_config, "--strict-mcp-config"])
+        cmd += self._mcp_config_flags(mcp_config)
         return cmd
 
     def parse_tui_event(self, raw: str) -> TuiParseResult:

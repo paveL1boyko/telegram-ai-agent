@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -115,6 +117,42 @@ def engine_keyboard(current_engine: str | None = None) -> InlineKeyboardMarkup:
             ],
         ],
     )
+
+
+def model_keyboard(
+    presets: Sequence[str],
+    current_model: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Picker for the model override of the current topic.
+
+    Buttons carry the preset index rather than the model id: ids like
+    `openrouter/anthropic/claude-fable-5[1m]` overflow the 64-byte
+    callback_data limit. The first row resets to the CLI default (whatever
+    `~/.claude/settings.json` selects), which is the only way back to "no
+    override" once one is pinned.
+    """
+
+    def _label(text: str, selected: bool) -> str:
+        return f"✅ {text}" if selected else text
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=_label(t("ui.model_default_label"), current_model is None),
+                callback_data="model:default",
+            ),
+        ],
+    ]
+    for idx, preset in enumerate(presets):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_label(preset, preset == current_model),
+                    callback_data=f"model:{idx}",
+                ),
+            ],
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def resume_keyboard(

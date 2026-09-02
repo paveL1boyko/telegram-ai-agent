@@ -115,6 +115,22 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.engine_invalid": "Invalid engine",
         "ui.engine_not_in_forum": "⚠️ /engine works only in forum topics",
         "ui.engine_write_failed": "Failed to save engine settings",
+        "ui.model_picker_caption": (
+            "Model: <b>{model}</b>\n\n"
+            "Pinned per topic and passed as <code>--model</code> on every start"
+            " and resume. A trailing <code>[1m]</code> keeps the 1M context window."
+        ),
+        "ui.model_default_label": "CLI default",
+        "ui.model_changed": "Model: {model}",
+        "ui.model_changed_new_session": (
+            "Model: {model}.\n\nActive session was reset. The next message"
+            " will start a new session with it."
+        ),
+        "ui.model_already": "Already selected",
+        "ui.model_invalid": "Invalid model",
+        "ui.model_no_presets": "⚠️ No model presets configured (MODEL_PRESETS)",
+        "ui.model_not_in_forum": "⚠️ /model works only in forum topics",
+        "ui.model_write_failed": "Failed to save model settings",
         "ui.tmux_started_engine": "🖥 New tmux session started with {engine}",
         "ui.reply_engine_switched": (
             "↪️ Reply target belongs to {engine}; switching this topic before resume."
@@ -347,6 +363,22 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.engine_invalid": "Неизвестный движок",
         "ui.engine_not_in_forum": "⚠️ /engine работает только внутри форум-топиков",
         "ui.engine_write_failed": "Не удалось сохранить настройки движка",
+        "ui.model_picker_caption": (
+            "Модель: <b>{model}</b>\n\n"
+            "Закрепляется за топиком и передаётся как <code>--model</code> при каждом"
+            " старте и resume. Суффикс <code>[1m]</code> сохраняет контекст в 1M."
+        ),
+        "ui.model_default_label": "Дефолт CLI",
+        "ui.model_changed": "Модель: {model}",
+        "ui.model_changed_new_session": (
+            "Модель — {model}.\n\nАктивная сессия сброшена. Следующее сообщение"
+            " запустит новую сессию с ней."
+        ),
+        "ui.model_already": "Уже выбрано",
+        "ui.model_invalid": "Неизвестная модель",
+        "ui.model_no_presets": "⚠️ Список моделей не настроен (MODEL_PRESETS)",
+        "ui.model_not_in_forum": "⚠️ /model работает только внутри форум-топиков",
+        "ui.model_write_failed": "Не удалось сохранить настройки модели",
         "ui.tmux_started_engine": "🖥 Создана новая tmux-сессия с {engine}",
         "ui.reply_engine_switched": ("↪️ Ответ ведёт в {engine}; переключаю топик перед resume."),
         "ui.stream_mode_picker_caption": (

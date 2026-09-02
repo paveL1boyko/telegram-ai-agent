@@ -8,7 +8,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import signal
 import time
 import uuid
@@ -50,7 +49,15 @@ from telegram_bot.core.services.cc_modes import (
     _get_mode_prompt,
 )
 from telegram_bot.core.services.codex_mcp import build_codex_mcp_config_args
-from telegram_bot.core.services.providers import CODEX_ADAPTER, ExecCommand, choose_available_engine
+from telegram_bot.core.services.providers import (
+    CODEX_ADAPTER,
+    ExecCommand,
+    choose_available_engine,
+    claude_mcp_config_flags,
+    claude_permission_flags,
+    resolve_claude_binary,
+)
+from telegram_bot.core.services.topic_config import normalize_model_override
 from telegram_bot.core.services.topic_runtime import BotDefaults, resolve_topic_runtime_config
 from telegram_bot.core.types import ChannelKey
 
@@ -90,14 +97,6 @@ __all__ = [
 ]
 
 _POLL_SEC = 30.0  # readline poll interval for inactivity check (not user-facing)
-_MODEL_OVERRIDE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
-
-
-def _valid_model_override(model: object) -> str | None:
-    if not isinstance(model, str):
-        return None
-    normalized = model.strip()
-    return normalized if _MODEL_OVERRIDE_RE.fullmatch(normalized) else None
 
 
 @dataclass
@@ -321,13 +320,13 @@ class SessionManager:
     ) -> list[str]:
         """Build claude CLI command with mode-specific prompts, tools, and mcp-config."""
         mcp_path = mcp_config or str(Path(self._settings.project_root) / ".mcp.bot.json")
+        binary = resolve_claude_binary()
         base = [
-            "claude",
+            binary,
             "--output-format",
             "stream-json",
             "--verbose",
-            "--permission-mode",
-            "bypassPermissions",
+            *claude_permission_flags(binary),
             "--allowedTools",
             self._mode_tools[mode],
             "--disallowedTools",
@@ -336,11 +335,10 @@ class SessionManager:
             "--max-turns",
             str(self._settings.cc_max_turns),
         ]
-        # Only attach an MCP config when the file exists. CC fails fast with
-        # "Invalid MCP configuration" if --mcp-config points at a missing path,
-        # which would block the bot for any user without an .mcp.bot.json.
-        if Path(mcp_path).exists():
-            base.extend(["--mcp-config", mcp_path, "--strict-mcp-config"])
+        # Vanilla claude keeps .mcp.bot.json; managed corporate builds run
+        # under a signed MCP allowlist that would block the `bot` server and
+        # hang the TUI prompt — see providers.claude_mcp_config_flags.
+        base.extend(claude_mcp_config_flags(binary, mcp_path))
 
         if session_id:
             # CC --resume reuses the session's original system prompt.
@@ -501,6 +499,7 @@ class SessionManager:
         *,
         session_id_new: str | None = None,
         resume_session_id: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build CC TUI startup args for persistent tmux session.
 
@@ -524,10 +523,21 @@ class SessionManager:
         `--session-id` worked for both semantics; that assumption was wrong
         and broke `switch_session` and `restore_all` resurrect.
 
-        `--dangerously-skip-permissions` is mandatory for TUI mode so that
-        no hardcoded `.claude/` permission dialog can trap the CC process
-        behind a confirmation prompt — relevant for agent-team subagents and
-        any MCP tool that touches protected paths.
+        `model` is passed through as `--model` whenever the topic pins one.
+        It matters most on the resume path: `claude --resume` adopts the
+        model recorded in the transcript, and transcripts store the bare id
+        without the `[1m]` context-window suffix. Without an explicit
+        `--model` a resumed 1M session silently comes back at the default
+        window — and the same happens after `model_fallbacks` swap the model
+        mid-session. An explicit flag pins the topic's choice on every spawn.
+
+        For vanilla claude `--dangerously-skip-permissions` is mandatory in
+        TUI mode so no hardcoded `.claude/` permission dialog can trap the
+        CC process behind a confirmation prompt — relevant for agent-team
+        subagents and any MCP tool that touches protected paths. The
+        corporate managed build runs under a signed permission policy that
+        disables that flag at launch, so it is omitted there
+        (`providers.claude_permission_flags`).
         """
         # Match the guard to the downstream selector: both use `is None`
         # semantics, so an accidental empty-string argument can't slip past
@@ -543,16 +553,18 @@ class SessionManager:
         else:
             assert resume_session_id is not None  # narrowing for mypy
             session_flag = ["--resume", resume_session_id]
+        binary = resolve_claude_binary()
+        normalized_model = normalize_model_override(model)
+        model_flag = ["--model", normalized_model] if normalized_model else []
         cmd = [
-            "claude",
+            binary,
             *session_flag,
-            "--dangerously-skip-permissions",
-            # in-process keeps only the team lead visible in the tmux window
-            # (no split panes per teammate). Required because the bot pipes
-            # through `tmux send-keys`/`capture-pane` without a pane index —
-            # split-pane mode would misroute input to an active teammate pane.
-            "--teammate-mode",
-            "in-process",
+            *model_flag,
+            # vanilla claude: --dangerously-skip-permissions + --teammate-mode
+            # in-process (see docstring above). Managed corporate builds skip
+            # these — the signed policy disables them at launch and the TUI
+            # would exit immediately.
+            *claude_permission_flags(binary),
             "--allowedTools",
             self._mode_tools[mode],
             "--disallowedTools",
@@ -561,8 +573,7 @@ class SessionManager:
             "--max-turns",
             str(self._settings.cc_max_turns),
         ]
-        if Path(mcp_path).exists():
-            cmd.extend(["--mcp-config", mcp_path, "--strict-mcp-config"])
+        cmd.extend(claude_mcp_config_flags(binary, mcp_path))
         return cmd
 
     def _is_cwd_configured(self, thread_id: int | None) -> bool:
@@ -1255,7 +1266,7 @@ class SessionManager:
             session_id = value.get("session_id")
             ch_str = value.get("channel_key")
             provider = value.get("provider", "claude")
-            model = _valid_model_override(value.get("model"))
+            model = normalize_model_override(value.get("model"))
             raw_exec_mode = value.get("exec_mode")
             exec_mode = raw_exec_mode if raw_exec_mode in {"subprocess", "tmux"} else None
             if not isinstance(session_id, str):

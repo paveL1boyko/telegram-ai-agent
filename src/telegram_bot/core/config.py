@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     topic_config_path: str = "./topic_config.json"
     notification_chat_id: int | None = None
     tmux_sessions_dir: str = "./tmux_sessions"
+    # Choices offered by /model, in button order. Override with a JSON list in
+    # `MODEL_PRESETS` to match whatever ids the local CLI build accepts — the
+    # bot only validates syntax, never the id itself. A trailing `[1m]` is the
+    # CLI's 1M-context flag and is preserved verbatim.
+    model_presets: list[str] = [
+        "anthropic/claude-opus-4-7[1m]",
+        "anthropic/claude-fable-5[1m]",
+        "openrouter/anthropic/claude-fable-5[1m]",
+        "openrouter/moonshotai/kimi-k3[1m]",
+        "openrouter/qwen/qwen3.8-max[1m]",
+    ]
 
 
 @functools.lru_cache(maxsize=1)

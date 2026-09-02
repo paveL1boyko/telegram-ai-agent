@@ -59,6 +59,49 @@ def make_session_name(channel_key: ChannelKey, *, prefix: str = "cc-") -> str:
     return f"{prefix}{chat_part}-{suffix}"
 
 
+def topic_slug(name: str | None, *, max_len: int = 40) -> str:
+    """Topic title → snake_case label for tmux window names.
+
+    Non-alphanumeric runs collapse to a single underscore; letters are kept
+    as-is rather than transliterated, so a Cyrillic topic stays readable.
+    Returns "" for a title with nothing usable in it — callers fall back to
+    the session name.
+    """
+    if not name:
+        return ""
+    slug = "".join(char if char.isalnum() else "_" for char in name.strip().lower())
+    slug = "_".join(part for part in slug.split("_") if part)
+    return slug[:max_len].rstrip("_")
+
+
+def label_tmux_session(session_name: str, topic_name: str | None) -> None:
+    """Tag a live tmux session with its Telegram topic, best effort.
+
+    The session *name* stays the deterministic channel-key string — it is
+    the identity key for `has-session`, `kill-session` and the persisted
+    state, and a topic rename must not orphan a running session. The human
+    label goes on the window (visible in `choose-tree`, i.e. `prefix + s`)
+    and on a `@topic` user option, so sessions can be listed readably with:
+
+        tmux ls -F '#{session_name}  #{@topic}'
+
+    Failures are logged and swallowed: a cosmetic label must never take a
+    working session down with it.
+    """
+    slug = topic_slug(topic_name)
+    if not slug:
+        return
+    for argv in (
+        ["tmux", "rename-window", "-t", f"{session_name}:0", slug],
+        ["tmux", "set-option", "-t", session_name, "@topic", slug],
+    ):
+        try:
+            subprocess.run(argv, capture_output=True, text=True, check=False)
+        except OSError:
+            logger.debug("Failed to label tmux session %s", session_name, exc_info=True)
+            return
+
+
 def tmux_alive(session_name: str) -> bool:
     """Synchronous tmux has-session check.
 

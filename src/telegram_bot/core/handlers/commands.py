@@ -18,6 +18,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.types.inaccessible_message import InaccessibleMessage
 
+from telegram_bot.core.config import Settings
 from telegram_bot.core.handlers.forward import ForwardBatcher
 from telegram_bot.core.keyboards import (
     RESUME_PAGE_SIZE,
@@ -25,6 +26,7 @@ from telegram_bot.core.keyboards import (
     _format_size,
     engine_keyboard,
     exec_mode_keyboard,
+    model_keyboard,
     resume_keyboard,
     stream_mode_keyboard,
     topic_keyboard,
@@ -47,6 +49,7 @@ from telegram_bot.core.services.topic_config import (
     _VALID_EXEC_MODES,
     _VALID_STREAM_MODES,
     TopicConfig,
+    normalize_model_override,
 )
 from telegram_bot.core.services.topic_runtime import BotDefaults, resolve_topic_runtime_config
 from telegram_bot.core.types import ChannelKey, channel_key
@@ -807,3 +810,121 @@ async def on_engine_click(
         logger.debug("Failed to refresh engine picker", exc_info=True)
     await callback.answer(t("ui.engine_changed", engine=engine_name))
     await callback.message.answer(t("ui.engine_changed_new_session", engine=engine_name))
+
+
+def _model_label(model: str | None) -> str:
+    """Human-facing name for a model override; `None` means the CLI default."""
+    return model if model else t("ui.model_default_label")
+
+
+def _model_picker_caption(model: str | None) -> str:
+    return t("ui.model_picker_caption", model=html.escape(_model_label(model)))
+
+
+@router.message(Command("model", magic=F.args.is_(None)))
+async def handle_model_command(
+    message: Message,
+    topic_config: TopicConfig,
+    settings: Settings,
+) -> None:
+    """Show the model-override picker for the current forum topic.
+
+    Only the bare `/model` is claimed here: `/model sonnet` keeps falling
+    through to the text handler and reaches the CLI's own dialog in the TUI
+    pane, as documented in `core.tui.routing`.
+    """
+    _, thread_id = channel_key(message)
+    if thread_id is None:
+        await message.answer(t("ui.model_not_in_forum"))
+        return
+    presets = settings.model_presets
+    if not presets:
+        await message.answer(t("ui.model_no_presets"))
+        return
+    current = topic_config.get_topic(thread_id)
+    await message.answer(
+        _model_picker_caption(current.model),
+        reply_markup=model_keyboard(presets, current.model),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("model:"))
+async def on_model_click(
+    callback: CallbackQuery,
+    topic_config: TopicConfig,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    session_manager: SessionManager,
+    settings: Settings,
+) -> None:
+    """Pin (or clear) the model override for the picker topic."""
+    if callback.data is None or callback.message is None:
+        await callback.answer()
+        return
+    if isinstance(callback.message, InaccessibleMessage):
+        await callback.answer()
+        return
+
+    _, _, raw_value = callback.data.partition(":")
+    thread_id = callback.message.message_thread_id
+    if thread_id is None:
+        await callback.answer(t("ui.model_not_in_forum"), show_alert=True)
+        return
+    key = (callback.message.chat.id, thread_id)
+    current = topic_config.get_topic(thread_id)
+
+    if tmux_manager.is_processing(key) or message_queue.is_busy(key):
+        await callback.answer(t("ui.exec_mode_busy"), show_alert=True)
+        return
+
+    presets = settings.model_presets
+    if raw_value == "default":
+        new_model: str | None = None
+    else:
+        # The keyboard may predate a MODEL_PRESETS edit, so the index is
+        # re-checked against the live list instead of trusted.
+        if not raw_value.isdigit() or int(raw_value) >= len(presets):
+            await callback.answer(t("ui.model_invalid"), show_alert=True)
+            return
+        new_model = normalize_model_override(presets[int(raw_value)])
+        if new_model is None:
+            logger.warning("Rejected model preset %r", presets[int(raw_value)])
+            await callback.answer(t("ui.model_invalid"), show_alert=True)
+            return
+
+    if new_model == current.model:
+        await callback.answer(t("ui.model_already"))
+        return
+
+    ok = await topic_config.update_engine_model(thread_id, current.engine, new_model)
+    if not ok:
+        await callback.answer(t("ui.model_write_failed"), show_alert=True)
+        return
+
+    # `--model` is a launch flag: a live CLI process keeps the old model
+    # until it is respawned, so the session is dropped here rather than
+    # leaving the topic claiming a model it is not actually running.
+    if tmux_manager.is_active(key):
+        await tmux_manager.kill(key)
+    await session_manager.clear_provider_session(key)
+
+    logger.info(
+        "model switched: user_id=%s thread_id=%s engine=%s previous=%s new=%s",
+        callback.from_user.id if callback.from_user else None,
+        thread_id,
+        current.engine,
+        current.model,
+        new_model,
+    )
+    label = _model_label(new_model)
+    try:
+        await callback.message.edit_text(
+            _model_picker_caption(new_model),
+            reply_markup=model_keyboard(presets, new_model),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.debug("Failed to refresh model picker", exc_info=True)
+    await callback.answer(t("ui.model_changed", model=label))
+    await callback.message.answer(t("ui.model_changed_new_session", model=label))

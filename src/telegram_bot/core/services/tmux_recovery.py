@@ -119,6 +119,7 @@ def build_resume_startup_cmd(
             mode=mode,
             mcp_config=mcp_config or "",
             resume_session_id=session_id,
+            model=model,
         ),
     )
 

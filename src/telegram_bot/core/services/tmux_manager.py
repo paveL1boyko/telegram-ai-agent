@@ -99,6 +99,7 @@ from telegram_bot.core.services.tmux_spawn import (
     file_size as _file_size_fn,
 )
 from telegram_bot.core.services.tmux_spawn import (
+    label_tmux_session,
     make_session_name,
     spawn_tmux_sync,
 )
@@ -523,6 +524,7 @@ class TmuxManager:
                 mode=mode,
                 mcp_config=mcp_config,
                 resume_session_id=resume_session_id,
+                model=model,
             )
             # Seek past all events already in the transcript — they were
             # delivered to Telegram in the previous run. offset=0 would
@@ -534,6 +536,7 @@ class TmuxManager:
                 mode=mode,
                 mcp_config=mcp_config,
                 session_id_new=session_id,
+                model=model,
             )
             initial_offset = 0
 
@@ -713,6 +716,8 @@ class TmuxManager:
                 stderr = result.stderr.strip()
             if result.returncode != 0:
                 raise RuntimeError(f"tmux new-session failed: {stderr}")
+
+        await asyncio.to_thread(label_tmux_session, name, self._topic_name(channel_key))
 
         # Check if session actually exists after new-session
         session_exists = await asyncio.to_thread(
@@ -1853,6 +1858,7 @@ class TmuxManager:
                 mode=state.mode,
                 mcp_config=state.mcp_config,
                 session_id_new=new_session_id,
+                model=state.model,
             )
             state.session_id = new_session_id
             state.transcript_path = None
@@ -1975,6 +1981,7 @@ class TmuxManager:
                 mode=state.mode,
                 mcp_config=state.mcp_config,
                 resume_session_id=new_session_id,
+                model=state.model,
             )
         try:
             await self._spawn_tmux(
@@ -2271,6 +2278,15 @@ class TmuxManager:
         )
 
     # --- Internal helpers ---
+
+    def _topic_name(self, channel_key: ChannelKey | None) -> str | None:
+        """Telegram topic title for the tmux window label, if known."""
+        thread_id = channel_key[1] if channel_key else None
+        get_topic = getattr(self._topic_config, "get_topic", None)
+        if thread_id is None or get_topic is None:
+            return None
+        name = getattr(get_topic(thread_id), "name", None)
+        return name if isinstance(name, str) else None
 
     def _make_name(self, channel_key: ChannelKey, provider: str = "claude") -> str:
         """Channel-key → tmux session name, using provider-specific prefix."""

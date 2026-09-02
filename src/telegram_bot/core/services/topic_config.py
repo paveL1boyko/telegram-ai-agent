@@ -41,14 +41,27 @@ _DEFAULT_EXEC_MODE: ExecMode = "subprocess"
 Engine = Literal["claude", "codex", "nessy"]
 _VALID_ENGINES: set[str] = {"claude", "codex", "nessy"}
 _DEFAULT_ENGINE: Engine = "claude"
-_MODEL_OVERRIDE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+# Model override syntax accepted by the agent CLIs:
+#   plain id           claude-opus-4-7
+#   routed id          openrouter/moonshotai/kimi-k3
+#   context suffix     anthropic/claude-opus-4-7[1m]
+# The bracket suffix is a client-side context-window flag, not part of the
+# model id — dropping it silently downgrades a 1M session to the default
+# window, so it must survive normalization. The first character excludes
+# "-" and "/" so a value can never be read as a CLI flag or absolute path.
+_MODEL_OVERRIDE_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._:/-]{0,79}(?:\[[A-Za-z0-9]{1,8}\])?$")
 _CORE_PROMPT_MODES: set[str] = {"task", "knowledge", "free", "project", "blog"}
 
 _valid_modes_cache: tuple[int, set[str]] = (-1, set())
 
 
-def _normalize_model(model: object) -> str | None:
-    """Normalize a model override from topic_config or UI writes."""
+def normalize_model_override(model: object) -> str | None:
+    """Normalize a model override from topic_config or UI writes.
+
+    Canonical for the whole runtime: `claude.py` imports this so the
+    persisted-session path and the topic-config path cannot drift into
+    accepting different syntax.
+    """
     if not isinstance(model, str):
         return None
     normalized = model.strip()
@@ -264,7 +277,7 @@ class TopicConfig:
                     engine = raw_engine  # type: ignore[assignment]
 
                 raw_model = value.get("model")
-                model = _normalize_model(raw_model)
+                model = normalize_model_override(raw_model)
                 if isinstance(raw_model, str) and raw_model.strip() and model is None:
                     logger.warning("Invalid model %r for topic %d, dropping", raw_model, thread_id)
 
@@ -427,7 +440,7 @@ class TopicConfig:
         if engine not in _VALID_ENGINES:
             logger.warning("update_engine_model: invalid engine %r", engine)
             return False
-        normalized = _normalize_model(model)
+        normalized = normalize_model_override(model)
         if isinstance(model, str) and model.strip() and normalized is None:
             logger.warning("update_engine_model: invalid model %r", model)
             return False
@@ -451,7 +464,7 @@ class TopicConfig:
         if exec_mode not in _VALID_EXEC_MODES:
             logger.warning("update_engine_model_exec_mode: invalid exec_mode %r", exec_mode)
             return False
-        normalized = _normalize_model(model)
+        normalized = normalize_model_override(model)
         if isinstance(model, str) and model.strip() and normalized is None:
             logger.warning("update_engine_model_exec_mode: invalid model %r", model)
             return False

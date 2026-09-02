@@ -7,6 +7,12 @@ sonnet`, `/mcp`) goes to the TUI.
 Note: `/stop` was removed per Decision 12 — use `/cancel` or the in-bot
 Stop button instead. `/tail` is handled by tail.py's aiogram Command handler
 before the text catch-all; it is intentionally not in BOT_RESERVED_COMMANDS.
+
+The same holds for a bare `/model`: commands.py claims it (with no argument)
+via an aiogram Command filter that runs before this routing, and shows the
+topic's model picker. It stays out of BOT_RESERVED_COMMANDS on purpose —
+this set matches on the first token only, so listing it here would also
+swallow `/model sonnet`, which has no bot handler and must reach the TUI.
 """
 
 from __future__ import annotations
