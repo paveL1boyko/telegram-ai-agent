@@ -1,4 +1,4 @@
-"""Command handlers for bot-owned slash commands except /tui and /tail."""
+"""Command handlers for bot-owned slash commands except /tui."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, ReplyKeyb
 from aiogram.types.inaccessible_message import InaccessibleMessage
 
 from telegram_bot.core.config import Settings
+from telegram_bot.core.handlers._dispatch import enqueue_prompt
 from telegram_bot.core.handlers.forward import ForwardBatcher
+from telegram_bot.core.handlers.streaming import send_to_tmux_if_active
 from telegram_bot.core.keyboards import (
     RESUME_PAGE_SIZE,
     _format_age,
@@ -35,7 +37,7 @@ from telegram_bot.core.messages import reset_lang_cache, t
 from telegram_bot.core.services.claude import SessionManager
 from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.picker_store import PickerState, PickerStore
-from telegram_bot.core.services.providers import engine_display_name
+from telegram_bot.core.services.providers import engine_display_name, get_adapter
 from telegram_bot.core.services.resume_listing import (
     SessionEntry,
     _same_cwd,
@@ -61,8 +63,8 @@ logger = logging.getLogger(__name__)
 def _exec_mode_label(mode: str) -> str:
     """Human-facing label per exec_mode.
 
-    Raw "subprocess" must never leak into the "Mode: …" toast — the picker
-    button text is the contract surface.
+    Raw "subprocess" must never leak into the "UI mode: …" toast — the
+    picker button text is the contract surface.
     """
     if mode == "subprocess":
         return t("ui.exec_mode_label_subprocess")
@@ -178,7 +180,11 @@ async def _reset_channel(
         if reset_live:
             session = session_manager._get_session(key)
             await message.answer(
-                t("ui.tmux_started_engine", engine=engine_display_name(session.engine)),
+                t(
+                    "ui.tmux_started_engine",
+                    engine=engine_display_name(session.engine),
+                    model=_model_label(session.model),
+                ),
                 reply_markup=reply_kb,
             )
             return
@@ -206,7 +212,11 @@ async def _reset_channel(
             await message.answer(t("ui.reset_failed"), reply_markup=reply_kb)
             return
         await message.answer(
-            t("ui.tmux_started_engine", engine=engine_display_name(session.engine)),
+            t(
+                "ui.tmux_started_engine",
+                engine=engine_display_name(session.engine),
+                model=_model_label(session.model),
+            ),
             reply_markup=reply_kb,
         )
         return
@@ -280,6 +290,49 @@ async def handle_kill(message: Message, tmux_manager: TmuxManager) -> None:
     )
     await tmux_manager.kill(key)
     await message.answer(t("ui.tmux_killed"))
+
+
+@router.message(Command("compact"))
+async def handle_compact_command(
+    message: Message,
+    message_queue: MessageQueue,
+    tmux_manager: TmuxManager,
+    topic_config: TopicConfig,
+) -> None:
+    """Compact the live tmux session context via the engine's native command.
+
+    `/compact` compresses conversation context without losing the logical
+    thread. It only makes sense for a persistent tmux session — subprocess
+    mode spawns a fresh process per message, so there is no context to
+    compact. The engine-specific slash command (/compact for Claude Code and
+    Codex, /compress for Nessy) is delivered to the running TUI; the
+    "Compacting…" / "Compacted N → M tokens" feedback comes back through the
+    transcript tail.
+    """
+    key = channel_key(message)
+    settings = topic_config.get_topic(key[1])
+    if settings.exec_mode != "tmux":
+        await message.answer(t("ui.compact_tmux_only"))
+        return
+    if not tmux_manager.is_active(key):
+        await message.answer(t("ui.tmux_not_active"))
+        return
+    command = get_adapter(settings.engine).compact_slash_command()
+    # Fast path: a tail is already running, so the command lands in the live
+    # TUI and the compact feedback streams back immediately.
+    if await send_to_tmux_if_active(key, command, message, tmux_manager):
+        return
+    # Session alive but no tail (e.g. right after /cancel): route through the
+    # queue so send_stream starts a tail that captures the compact output.
+    enqueue_prompt(
+        key,
+        command,
+        message,
+        message_queue,
+        tmux_manager,
+        target_session_id=None,
+        inject_reply_if_no_target=False,
+    )
 
 
 @router.message(Command("reconnect"))
@@ -541,7 +594,7 @@ async def on_resume_pick(
         return
 
     message_key = "ui.resume_switched" if result.kind == "switched" else "ui.resume_started"
-    text = t(message_key, sid=entry.session_id[:8])
+    text = t(message_key, sid=entry.session_id[:8], model=_model_label(result.model))
     if result.engine_changed:
         text += "\n" + t("ui.resume_engine_switched", engine=entry.provider)
     await callback.message.edit_text(text, reply_markup=None, parse_mode="HTML")
@@ -617,9 +670,13 @@ async def on_stream_mode_click(
     await callback.answer(t("ui.stream_mode_changed", mode=mode))
 
 
-@router.message(Command("mode"))
-async def handle_mode_command(message: Message, topic_config: TopicConfig) -> None:
-    """Show a 2-button picker to switch exec_mode for the current topic."""
+@router.message(Command("uimode"))
+async def handle_uimode_command(message: Message, topic_config: TopicConfig) -> None:
+    """Show a 2-button picker to switch exec_mode for the current topic.
+
+    Named `/uimode` (not `/mode`) so it does not collide with `/model` in
+    users' heads; internally the setting is still `exec_mode`.
+    """
     _, thread_id = channel_key(message)
     if thread_id is None:
         await message.answer(t("ui.exec_mode_not_in_forum"))
@@ -710,21 +767,6 @@ async def on_exec_mode_click(
     except Exception:
         logger.debug("Failed to refresh exec_mode picker", exc_info=True)
     await callback.answer(t("ui.exec_mode_changed", mode=_exec_mode_label(new_mode)))
-
-
-@router.message(F.text == t("ui.btn_engine"))
-async def handle_engine_button(message: Message, topic_config: TopicConfig) -> None:
-    """Reply-keyboard Engine button — same as /engine."""
-    _, thread_id = channel_key(message)
-    if thread_id is None:
-        await message.answer(t("ui.engine_not_in_forum"))
-        return
-    settings = topic_config.get_topic(thread_id)
-    await message.answer(
-        t("ui.engine_picker_caption", engine=engine_display_name(settings.engine)),
-        reply_markup=engine_keyboard(settings.engine),
-        parse_mode="HTML",
-    )
 
 
 @router.message(Command("engine"))
@@ -821,17 +863,31 @@ def _model_picker_caption(model: str | None) -> str:
     return t("ui.model_picker_caption", model=html.escape(_model_label(model)))
 
 
-@router.message(Command("model", magic=F.args.is_(None)))
-async def handle_model_command(
+async def _refresh_model_picker(
+    callback: CallbackQuery, presets: list[str], new_model: str | None
+) -> None:
+    """Re-render the picker so the visible checkmark matches the saved value."""
+    message = callback.message
+    if message is None or isinstance(message, InaccessibleMessage):
+        return
+    try:
+        await message.edit_text(
+            _model_picker_caption(new_model),
+            reply_markup=model_keyboard(presets, new_model),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.debug("Failed to refresh model picker", exc_info=True)
+
+
+async def _show_model_picker(
     message: Message,
     topic_config: TopicConfig,
     settings: Settings,
 ) -> None:
-    """Show the model-override picker for the current forum topic.
+    """Post the model-override picker for the message's forum topic.
 
-    Only the bare `/model` is claimed here: `/model sonnet` keeps falling
-    through to the text handler and reaches the CLI's own dialog in the TUI
-    pane, as documented in `core.tui.routing`.
+    Shared by the bare `/model` command and the reply-keyboard Model button.
     """
     _, thread_id = channel_key(message)
     if thread_id is None:
@@ -847,6 +903,31 @@ async def handle_model_command(
         reply_markup=model_keyboard(presets, current.model),
         parse_mode="HTML",
     )
+
+
+@router.message(Command("model", magic=F.args.is_(None)))
+async def handle_model_command(
+    message: Message,
+    topic_config: TopicConfig,
+    settings: Settings,
+) -> None:
+    """Show the model-override picker for the current forum topic.
+
+    Only the bare `/model` is claimed here: `/model sonnet` keeps falling
+    through to the text handler and reaches the CLI's own dialog in the TUI
+    pane, as documented in `core.tui.routing`.
+    """
+    await _show_model_picker(message, topic_config, settings)
+
+
+@router.message(F.text == t("ui.btn_model"))
+async def handle_model_button(
+    message: Message,
+    topic_config: TopicConfig,
+    settings: Settings,
+) -> None:
+    """Reply-keyboard Model button — same as bare /model."""
+    await _show_model_picker(message, topic_config, settings)
 
 
 @router.callback_query(F.data.startswith("model:"))
@@ -902,9 +983,49 @@ async def on_model_click(
         await callback.answer(t("ui.model_write_failed"), show_alert=True)
         return
 
-    # `--model` is a launch flag: a live CLI process keeps the old model
-    # until it is respawned, so the session is dropped here rather than
-    # leaving the topic claiming a model it is not actually running.
+    label = _model_label(new_model)
+
+    # Prefer a live switch: send `/model <id>` straight into the running TUI
+    # pane — the engine switches the model inside the current session, context
+    # intact, no respawn. The busy-check above guarantees the session is idle,
+    # so the command lands in the input bar, not mid-turn. set_processing=False:
+    # a model switch is not a processing turn (no result event would ever
+    # clear the flag).
+    if tmux_manager.is_active(key):
+        live_command = get_adapter(current.engine).live_model_command(new_model)
+        if live_command is not None:
+            if await tmux_manager.send_direct(key, live_command, set_processing=False):
+                tmux_manager.update_session_model(key, new_model)
+                logger.info(
+                    "model switched live: user_id=%s thread_id=%s engine=%s previous=%s new=%s",
+                    callback.from_user.id if callback.from_user else None,
+                    thread_id,
+                    current.engine,
+                    current.model,
+                    new_model,
+                )
+                await _refresh_model_picker(callback, presets, new_model)
+                await callback.answer(t("ui.model_changed", model=label))
+                await callback.message.answer(t("ui.model_changed_live", model=label))
+                return
+            # Modal-blocked or tmux failure — the alert is already posted.
+            # The override is persisted above, so it applies on the next
+            # session start; the live session keeps its model and context.
+            logger.info(
+                "model live switch blocked: thread_id=%s engine=%s new=%s",
+                thread_id,
+                current.engine,
+                new_model,
+            )
+            await _refresh_model_picker(callback, presets, new_model)
+            await callback.answer(t("ui.model_changed", model=label))
+            await callback.message.answer(t("ui.model_live_failed", model=label))
+            return
+
+    # Respawn path: `--model` is a launch flag, and engines without a live
+    # switch (Codex) or topics without a live session only pick the model
+    # up on the next start. The session is dropped rather than leaving the
+    # topic claiming a model it is not actually running.
     if tmux_manager.is_active(key):
         await tmux_manager.kill(key)
     await session_manager.clear_provider_session(key)
@@ -917,14 +1038,6 @@ async def on_model_click(
         current.model,
         new_model,
     )
-    label = _model_label(new_model)
-    try:
-        await callback.message.edit_text(
-            _model_picker_caption(new_model),
-            reply_markup=model_keyboard(presets, new_model),
-            parse_mode="HTML",
-        )
-    except Exception:
-        logger.debug("Failed to refresh model picker", exc_info=True)
+    await _refresh_model_picker(callback, presets, new_model)
     await callback.answer(t("ui.model_changed", model=label))
     await callback.message.answer(t("ui.model_changed_new_session", model=label))

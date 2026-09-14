@@ -77,14 +77,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ui.tui_start_timeout": (
             "❌ Claude Code TUI didn't become ready in 30 s — tmux killed."
-            " Try again or /mode → regular."
+            " Try again or /uimode → regular."
         ),
         "ui.tui_session_missing": (
             "Session unavailable (created before migration) — keep writing to the current session."
         ),
         # --- UI: exec-mode picker -------------------------------------
         "ui.exec_mode_picker_caption": (
-            "Execution mode: <b>{current}</b>\n\n"
+            "UI mode: <b>{current}</b>\n\n"
             "⚡ regular — each message spawns a fresh Claude subprocess with"
             " no context from previous messages. Task runs, session dies, no"
             " resource footprint. Good for one-off tasks, notes, etc.\n\n"
@@ -94,17 +94,17 @@ MESSAGES: dict[str, dict[str, str]] = {
             " development and big tasks. First start takes ~1-2s. To kill the"
             " session and free resources — use /kill."
         ),
-        "ui.exec_mode_changed": "Mode: {mode}",
+        "ui.exec_mode_changed": "UI mode: {mode}",
         "ui.exec_mode_already": "Already: {mode}",
         "ui.exec_mode_busy": "Processing in progress, hit /cancel first",
         "ui.exec_mode_invalid": "Invalid mode",
-        "ui.exec_mode_not_in_forum": "⚠️ /mode works only in forum topics",
+        "ui.exec_mode_not_in_forum": "⚠️ /uimode works only in forum topics",
         "ui.exec_mode_write_failed": "Failed to save mode, try again",
         "ui.exec_mode_label_subprocess": "⚡ regular",
         "ui.exec_mode_label_tmux": "🖥 tmux",
         "ui.engine_picker_caption": (
             "Engine: <b>{engine}</b>\n\n"
-            "This does not change /mode: regular and tmux remain transport settings."
+            "This does not change /uimode: regular and tmux remain transport settings."
         ),
         "ui.engine_changed": "Engine: {engine}",
         "ui.engine_changed_new_session": (
@@ -131,7 +131,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.model_no_presets": "⚠️ No model presets configured (MODEL_PRESETS)",
         "ui.model_not_in_forum": "⚠️ /model works only in forum topics",
         "ui.model_write_failed": "Failed to save model settings",
-        "ui.tmux_started_engine": "🖥 New tmux session started with {engine}",
+        "ui.model_changed_live": (
+            "Model: {model}.\n\nApplied to the current session — context preserved."
+        ),
+        "ui.model_live_failed": (
+            "⚠️ Couldn't apply the model to the live session. Saved — it will"
+            " apply on the next session start."
+        ),
+        "ui.compact_tmux_only": (
+            "⚠️ /compact needs a live tmux session — switch /uimode to tmux first."
+        ),
+        "ui.tmux_started_engine": "🖥 New tmux session started with {engine} — model: {model}",
         "ui.reply_engine_switched": (
             "↪️ Reply target belongs to {engine}; switching this topic before resume."
         ),
@@ -150,14 +160,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.resume_picker_caption_hdr": "Sessions for <code>{cwd}</code>, page {page}/{total}",
         "ui.resume_no_sessions": "No saved sessions for this cwd",
         "ui.resume_not_in_forum": "⚠️ /resume works only in forum topics",
-        "ui.resume_subprocess_unsupported": "This command works only in tmux mode (/mode)",
+        "ui.resume_subprocess_unsupported": "This command works only in tmux mode (/uimode)",
         "ui.resume_already_on_it": "Already on this session",
         "ui.resume_target_missing": "Transcript disappeared; open /resume again",
         "ui.resume_invalid_id": "Invalid session ID",
         "ui.resume_starting": "Resuming...",
         "ui.resume_current_marker": "current",
-        "ui.resume_switched": "🔄 session: <code>{sid}</code>",
-        "ui.resume_started": "🆕 tmux started with resume <code>{sid}</code>",
+        "ui.resume_switched": "🔄 session: <code>{sid}</code> — model: {model}",
+        "ui.resume_started": "🆕 tmux started with resume <code>{sid}</code> — model: {model}",
         "ui.resume_engine_switched": "↪️ Switching engine to <code>{engine}</code>",
         "ui.resume_picker_stale": "List is stale, open /resume again",
         "ui.resume_spawn_failed": "Failed to start tmux. The next message will start fresh.",
@@ -187,7 +197,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.btn_new_chat": "New chat",
         "ui.btn_cancel": "Cancel ❌",
         "ui.btn_tui": "TUI 🖥",
-        "ui.btn_engine": "Engine ⚙️",
+        "ui.btn_model": "Model 🤖",
         # --- CC content prefixes (injected into prompts) --------------
         "cc.voice_transcript_short": "[Voice, transcription]:",
         "cc.voice_failed_full": "[Voice message: failed to transcribe]",
@@ -325,14 +335,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ui.tui_start_timeout": (
             "❌ Claude Code TUI не поднялся за 30 с — tmux убит."
-            " Попробуй ещё раз или переключись /mode → обычный."
+            " Попробуй ещё раз или переключись /uimode → обычный."
         ),
         "ui.tui_session_missing": (
             "Эта сессия недоступна (создана до миграции) — пиши в текущую сессию дальше."
         ),
         # --- UI: exec-mode picker -------------------------------------
         "ui.exec_mode_picker_caption": (
-            "Режим выполнения: <b>{current}</b>\n\n"
+            "UI mode: <b>{current}</b>\n\n"
             "⚡ обычный — каждое сообщение запускает сабпроцесс Claude без"
             " контекста от прошлых сообщений. Задача выполняется, сессия"
             " умирает, ресурсы не жрёт. Подходит для разовых задач, заметок"
@@ -343,16 +353,16 @@ MESSAGES: dict[str, dict[str, str]] = {
             " разработки и больших задач. Первый запуск ~1-2 сек. Чтобы убить"
             " сессию и освободить ресурсы — команда /kill."
         ),
-        "ui.exec_mode_changed": "Режим: {mode}",
+        "ui.exec_mode_changed": "UI mode: {mode}",
         "ui.exec_mode_already": "Уже: {mode}",
         "ui.exec_mode_busy": "Сейчас идёт обработка, нажми /cancel и повтори",
         "ui.exec_mode_invalid": "Неизвестный режим",
-        "ui.exec_mode_not_in_forum": "⚠️ /mode работает только в форум-топиках",
+        "ui.exec_mode_not_in_forum": "⚠️ /uimode работает только в форум-топиках",
         "ui.exec_mode_write_failed": "Не удалось сохранить режим, попробуй ещё раз",
         "ui.exec_mode_label_subprocess": "⚡ обычный",
         "ui.exec_mode_label_tmux": "🖥 tmux",
         "ui.engine_picker_caption": (
-            "Движок: <b>{engine}</b>\n\n/mode остаётся режимом транспорта: обычный или tmux."
+            "Движок: <b>{engine}</b>\n\n/uimode остаётся режимом транспорта: обычный или tmux."
         ),
         "ui.engine_changed": "Движок: {engine}",
         "ui.engine_changed_new_session": (
@@ -379,7 +389,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.model_no_presets": "⚠️ Список моделей не настроен (MODEL_PRESETS)",
         "ui.model_not_in_forum": "⚠️ /model работает только внутри форум-топиков",
         "ui.model_write_failed": "Не удалось сохранить настройки модели",
-        "ui.tmux_started_engine": "🖥 Создана новая tmux-сессия с {engine}",
+        "ui.model_changed_live": (
+            "Модель — {model}.\n\nПрименена к текущей сессии — контекст сохранён."
+        ),
+        "ui.model_live_failed": (
+            "⚠️ Не удалось применить модель к живой сессии. Модель сохранена и"
+            " применится при следующем запуске сессии."
+        ),
+        "ui.compact_tmux_only": (
+            "⚠️ /compact работает только с живой tmux-сессией — переключи /uimode в tmux."
+        ),
+        "ui.tmux_started_engine": "🖥 Создана новая tmux-сессия с {engine} — модель: {model}",
         "ui.reply_engine_switched": ("↪️ Ответ ведёт в {engine}; переключаю топик перед resume."),
         "ui.stream_mode_picker_caption": (
             "Режим трансляции этого топика: <b>{current}</b>\n\n"
@@ -396,14 +416,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.resume_picker_caption_hdr": "Сессии для <code>{cwd}</code>, страница {page}/{total}",
         "ui.resume_no_sessions": "Сохранённых сессий для этого cwd нет",
         "ui.resume_not_in_forum": "⚠️ /resume работает только внутри форум-топиков",
-        "ui.resume_subprocess_unsupported": "Команда работает только в tmux-режиме (/mode)",
+        "ui.resume_subprocess_unsupported": "Команда работает только в tmux-режиме (/uimode)",
         "ui.resume_already_on_it": "Уже на этой сессии",
         "ui.resume_target_missing": "Транскрипт пропал; открой /resume заново",
         "ui.resume_invalid_id": "Некорректный ID сессии",
         "ui.resume_starting": "Возобновляю...",
         "ui.resume_current_marker": "текущая",
-        "ui.resume_switched": "🔄 сессия: <code>{sid}</code>",
-        "ui.resume_started": "🆕 tmux поднят с resume <code>{sid}</code>",
+        "ui.resume_switched": "🔄 сессия: <code>{sid}</code> — модель: {model}",
+        "ui.resume_started": "🆕 tmux поднят с resume <code>{sid}</code> — модель: {model}",
         "ui.resume_engine_switched": "↪️ Переключаю движок на <code>{engine}</code>",
         "ui.resume_picker_stale": "Список устарел, открой /resume заново",
         "ui.resume_spawn_failed": (
@@ -434,7 +454,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.btn_new_chat": "Новый чат",
         "ui.btn_cancel": "Отменить ❌",
         "ui.btn_tui": "TUI 🖥",
-        "ui.btn_engine": "Engine ⚙️",
+        "ui.btn_model": "Модель 🤖",
         # CC content prefixes are intentionally English-only — see MESSAGES["en"].
         # --- Queue messages -------------------------------------------
         "ui.queue_added_batch": "Добавлено в батч, он №{position} в очереди",

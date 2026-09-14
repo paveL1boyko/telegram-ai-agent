@@ -197,12 +197,13 @@ open the generated `topic_config.json` and edit the new entry.
 
 ## Topic Configuration
 
-You can edit `topic_config.json` directly, use `/engine`, `/mode`, and `/stream`
+You can edit `topic_config.json` directly, use `/engine`, `/uimode`, and `/stream`
 inside Telegram forum topics, or ask the `topic-setup` skill to configure
 topics.
 
 Terminology is important: config field `mode` means prompt mode. Telegram
-command `/mode` changes execution mode, stored as `exec_mode`.
+command `/uimode` changes the UI mode (transport), stored as `exec_mode`.
+The name avoids clashing with `/model`.
 
 Example:
 
@@ -258,9 +259,9 @@ code; otherwise the agent may not have an allowed tool list. Keep private data,
 secrets, personal workflows, and real customer context out of the public
 repository.
 
-## Execution Modes
+## UI Modes
 
-`/mode` chooses how the agent process runs.
+`/uimode` chooses how the agent process runs.
 
 ### tmux
 
@@ -289,7 +290,7 @@ good for simple questions, notes, small transformations, and tasks where you do
 not want a persistent TUI session running in the background.
 
 Private chats use default settings and are good for simple use. Per-topic
-controls such as `/mode`, `/stream`, `/engine`, and `/resume` work in forum
+controls such as `/uimode`, `/stream`, `/engine`, and `/resume` work in forum
 topics, because they need a topic-specific config entry.
 
 ## Stream Modes
@@ -321,8 +322,6 @@ Use `/tui` to:
   open `/tui` and dismiss the modal with the keyboard;
 - recover from a stuck-looking interactive state.
 
-`/tail` is a legacy alias for `/tui`.
-
 ## Reply, Resume, And Sessions
 
 The bot records which agent session produced each answer. If you reply to an
@@ -336,8 +335,9 @@ different engine or execution mode, the bot can switch the topic settings
 before resuming. If a live tmux session must be replaced, it can be stopped as
 part of that switch.
 
-Slash commands are special in tmux topics: non-bot commands such as `/model` or
-`/compact` are sent to the live TUI, not to the replied-to historical session.
+Slash commands are special in tmux topics: non-bot commands such as
+`/model sonnet` or `/mcp` are sent to the live TUI, not to the replied-to
+historical session.
 
 `/clear` starts fresh logical context for the current topic. In tmux mode the
 bot resets or respawns the tmux session depending on the current state. `/new`
@@ -348,22 +348,27 @@ still exists as a legacy alias, but `/clear` is the command shown in the menu.
 - `/start`: check that the bot responds and show the basic keyboard.
 - `/clear`: reset the current topic session.
 - `/cancel`: cancel current processing.
+- `/compact`: tmux mode only; compress the context of the live session without
+  losing the conversation thread.
 - `/language`: show or switch UI language, for example `/language ru`.
-- `/mode`: forum topics only; choose `tmux` or `subprocess`. Switching from
+- `/uimode`: forum topics only; choose `tmux` or `subprocess`. Switching from
   `tmux` to `subprocess` stops the active tmux session.
 - `/engine`: forum topics only; choose Claude Code or Codex. Changing engine
   resets the active session.
+- `/model`: forum topics only; choose the model override for the topic. For a
+  live Claude Code or Nessy tmux session the new model is applied inside the
+  running session (`/model <id>` in the TUI pane) and context is preserved;
+  Codex and topics without a live session pick the model up on the next start.
 - `/stream`: forum topics only; choose `verbose`, `live`, or `minimal`.
 - `/resume`: forum topics only; resume a saved tmux session for the current
   topic working directory.
 - `/tui`: show and control the live tmux TUI.
-- `/tail`: legacy alias for `/tui`.
 - `/kill`: stop the active tmux session and free resources.
 
 Recommended defaults:
 
-- Real development: `/mode` -> `tmux`, `/stream` -> `live`.
-- Short one-off tasks: `/mode` -> `subprocess`, `/stream` -> `minimal` or
+- Real development: `/uimode` -> `tmux`, `/stream` -> `live`.
+- Short one-off tasks: `/uimode` -> `subprocess`, `/stream` -> `minimal` or
   `live`.
 - Old session no longer needed: `/kill`.
 

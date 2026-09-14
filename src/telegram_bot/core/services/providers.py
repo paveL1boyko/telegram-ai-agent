@@ -159,6 +159,18 @@ class ProviderAdapter(Protocol):
 
     def format_pane_html(self, raw_pane: str) -> str: ...
 
+    def live_model_command(self, model: str | None) -> str | None:
+        """Slash command that applies `model` inside a RUNNING TUI session.
+
+        Returning None means the engine only honours `--model` at launch —
+        the caller must fall back to kill+respawn to change the model.
+        """
+        ...
+
+    def compact_slash_command(self) -> str:
+        """Native TUI slash command that compacts the current context."""
+        ...
+
 
 def _load_json(raw: str) -> dict[str, Any] | None:
     try:
@@ -600,6 +612,14 @@ class CodexAdapter:
 
         return _fmt(raw_pane)
 
+    def live_model_command(self, model: str | None) -> str | None:
+        # Codex honours --model at launch only; its in-TUI /model opens a
+        # modal picker that cannot be driven safely through paste+Enter.
+        return None
+
+    def compact_slash_command(self) -> str:
+        return "/compact"
+
 
 # ---------------------------------------------------------------------------
 # Shared Claude binary resolution + flag policy (bot also uses these helpers
@@ -864,6 +884,15 @@ class ClaudeAdapter:
 
         return _fmt(raw_pane)
 
+    def live_model_command(self, model: str | None) -> str | None:
+        # `/model <id>` applies inside the running session without losing
+        # context; `/model default` returns to the CLI default. The TUI may
+        # reject ids it does not know — the error surfaces in the pane.
+        return f"/model {model}" if model else "/model default"
+
+    def compact_slash_command(self) -> str:
+        return "/compact"
+
 
 CLAUDE_ADAPTER = ClaudeAdapter()
 
@@ -1111,6 +1140,14 @@ class NessyAdapter:
         from telegram_bot.core.tui.format_nessy import format_pane_html as _fmt
 
         return _fmt(raw_pane)
+
+    def live_model_command(self, model: str | None) -> str | None:
+        # Gemini-style CLI: `/model <name>` switches the running session.
+        return f"/model {model}" if model else "/model default"
+
+    def compact_slash_command(self) -> str:
+        # Gemini-style CLI names the context-compression command /compress.
+        return "/compress"
 
     def transcript_snapshot(self) -> tuple[set[Path], float]:
         """Snapshot existing Nessy transcripts and current wall time.

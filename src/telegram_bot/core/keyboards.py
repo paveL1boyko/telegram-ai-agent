@@ -32,7 +32,7 @@ def topic_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text=t("ui.btn_cancel")),
             ],
             [
-                KeyboardButton(text=t("ui.btn_engine")),
+                KeyboardButton(text=t("ui.btn_model")),
                 KeyboardButton(text=t("ui.btn_tui")),
             ],
         ],

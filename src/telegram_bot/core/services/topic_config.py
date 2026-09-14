@@ -42,9 +42,9 @@ Engine = Literal["claude", "codex", "nessy"]
 _VALID_ENGINES: set[str] = {"claude", "codex", "nessy"}
 _DEFAULT_ENGINE: Engine = "claude"
 # Model override syntax accepted by the agent CLIs:
-#   plain id           claude-opus-4-7
+#   plain id           claude-fable-5
 #   routed id          openrouter/moonshotai/kimi-k3
-#   context suffix     anthropic/claude-opus-4-7[1m]
+#   context suffix     anthropic/claude-fable-5[1m]
 # The bracket suffix is a client-side context-window flag, not part of the
 # model id — dropping it silently downgrades a 1M session to the default
 # window, so it must survive normalization. The first character excludes

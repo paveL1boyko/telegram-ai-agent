@@ -212,6 +212,10 @@ class SwitchResult:
     ]
     engine_changed: bool = False
     mode_changed: bool = False
+    # Model override the resumed session was actually started with — None
+    # means the CLI default. Lets the resume notice show whether a [1m]
+    # override survived the switch.
+    model: str | None = None
 
 
 class TmuxManager:
@@ -430,6 +434,20 @@ class TmuxManager:
         """Return current tmux session-name for a channel (e.g. `cc-1-0`)."""
         state = self._sessions.get(channel_key)
         return state.session_name if state else None
+
+    def update_session_model(self, channel_key: ChannelKey, model: str | None) -> bool:
+        """Record a new model on the live session after an in-TUI `/model` switch.
+
+        Keeps the respawn paths (`clear_context`, `switch_session`) and the
+        persisted state.json in agreement with what the running TUI actually
+        uses. Returns False when no session is registered for the channel.
+        """
+        state = self._sessions.get(channel_key)
+        if state is None:
+            return False
+        state.model = model
+        self._save_state()
+        return True
 
     def peek_saved_session(self, channel_key: ChannelKey, cwd: str) -> str | None:
         """Return a safely-resumable session_id from state.json, or None.
@@ -1425,7 +1443,13 @@ class TmuxManager:
             for candidate in candidates
         )
 
-    async def send_direct(self, channel_key: ChannelKey, prompt: str) -> bool:
+    async def send_direct(
+        self,
+        channel_key: ChannelKey,
+        prompt: str,
+        *,
+        set_processing: bool = True,
+    ) -> bool:
         """Deliver `prompt` to the tmux TUI, verifying the input actually
         landed before sending Enter. Returns True iff Enter was sent.
 
@@ -1433,25 +1457,33 @@ class TmuxManager:
         delete the "Thinking..." placeholder and close any LiveStatusBuffer
         it spawned — otherwise both hang forever with no signal back to
         the user.
+
+        `set_processing=False` is for control commands (an in-TUI `/model`
+        switch) that are not a processing turn: leaving the flag set would
+        wedge the busy-checks until /cancel because no result event follows.
         """
         async with self._get_channel_lock(channel_key):
             state = self._sessions.get(channel_key)
             if not state:
                 return False
-            return await self._send_direct_locked(channel_key, state, prompt)
+            return await self._send_direct_locked(
+                channel_key, state, prompt, set_processing=set_processing
+            )
 
     async def _send_direct_locked(
         self,
         channel_key: ChannelKey,
         state: TmuxSessionState,
         prompt: str,
+        *,
+        set_processing: bool = True,
     ) -> bool:
         session_name = state.session_name
         logger.info("TUI_IO: send_direct session=%s len=%d", session_name, len(prompt))
 
         # Reuses the shared safe-send helper; on False the modal alert was
         # already posted. Setting the processing flag happens AFTER verify
-        # so that a modal-blocked send doesn't leave `/mode` picker busy.
+        # so that a modal-blocked send doesn't leave `/uimode` picker busy.
         if not await self._safe_send_and_enter(channel_key, state, prompt):
             return False
 
@@ -1459,7 +1491,8 @@ class TmuxManager:
         # checks; send_stream's finally block clears it. For the pure
         # send_direct path (no tail loop follows), the tail-runner's
         # result_message will clear it, or cancel() will on timeout.
-        self._is_processing[channel_key] = True
+        if set_processing:
+            self._is_processing[channel_key] = True
         logger.info("TUI_IO: send_direct delivered session=%s", session_name)
         return True
 
@@ -2136,6 +2169,7 @@ class TmuxManager:
                 kind="switched" if captured else "started",
                 engine_changed=engine_changed,
                 mode_changed=mode_changed,
+                model=runtime.model,
             )
 
     async def kill(self, channel_key: ChannelKey) -> None:

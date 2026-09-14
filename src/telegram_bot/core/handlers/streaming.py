@@ -325,7 +325,11 @@ async def ensure_exec_mode_ready(
             msg_id,
         )
         await source_msg.answer(
-            t("ui.tmux_started_engine", engine=engine_display_name(engine)),
+            t(
+                "ui.tmux_started_engine",
+                engine=engine_display_name(engine),
+                model=model if model else t("ui.model_default_label"),
+            ),
             disable_notification=True,
         )
         return True

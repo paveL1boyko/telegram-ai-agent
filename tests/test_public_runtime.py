@@ -16,6 +16,7 @@ from telegram_bot.core.services.claude import SessionManager
 from telegram_bot.core.services.providers import (
     CLAUDE_ADAPTER,
     CODEX_ADAPTER,
+    NESSY_ADAPTER,
     choose_available_engine,
 )
 from telegram_bot.core.services.tmux_spawn import topic_slug
@@ -143,14 +144,20 @@ def test_codex_provider_parser_smoke() -> None:
 def test_model_override_keeps_routing_prefix_and_context_suffix() -> None:
     # `[1m]` selects the 1M context window and `openrouter/...` selects the
     # route; dropping either silently downgrades the session.
-    assert normalize_model_override("anthropic/claude-opus-4-7[1m]") == (
-        "anthropic/claude-opus-4-7[1m]"
+    assert normalize_model_override("anthropic/claude-fable-5[1m]") == (
+        "anthropic/claude-fable-5[1m]"
     )
     assert normalize_model_override("openrouter/moonshotai/kimi-k3[1m]") == (
         "openrouter/moonshotai/kimi-k3[1m]"
     )
-    assert normalize_model_override("claude-opus-4-7") == "claude-opus-4-7"
-    assert normalize_model_override("  claude-opus-4-7  ") == "claude-opus-4-7"
+    # Dotted ids (gpt-5.5, grok-4.6) must survive verbatim too.
+    assert normalize_model_override("openrouter/openai/gpt-5.5[1m]") == (
+        "openrouter/openai/gpt-5.5[1m]"
+    )
+    assert normalize_model_override("xai/grok-4.6[1m]") == "xai/grok-4.6[1m]"
+    assert normalize_model_override("openai/gpt-6-astra[1m]") == "openai/gpt-6-astra[1m]"
+    assert normalize_model_override("claude-fable-5") == "claude-fable-5"
+    assert normalize_model_override("  claude-fable-5  ") == "claude-fable-5"
     assert normalize_model_override("") is None
     assert normalize_model_override(None) is None
     # A value that could be read as a CLI flag must never reach argv.
@@ -168,7 +175,7 @@ def test_claude_tmux_args_pin_model_on_start_and_resume(tmp_path: Path) -> None:
         project_root=str(tmp_path),
     )
     session_manager = SessionManager(settings)
-    model = "anthropic/claude-opus-4-7[1m]"
+    model = "anthropic/claude-fable-5[1m]"
 
     started = session_manager.build_tmux_startup_args(
         session_id_new=generate_session_uuid(),
@@ -211,7 +218,7 @@ def test_model_presets_are_valid_overrides() -> None:
 
 
 def test_model_keyboard_offers_default_reset_and_fits_callback_limit() -> None:
-    presets = ["openrouter/anthropic/claude-fable-5[1m]", "anthropic/claude-opus-4-7"]
+    presets = ["openrouter/anthropic/claude-fable-5[1m]", "anthropic/claude-fable-5"]
 
     markup = model_keyboard(presets, current_model=presets[1])
     buttons = [button for row in markup.inline_keyboard for button in row]
@@ -224,6 +231,99 @@ def test_model_keyboard_offers_default_reset_and_fits_callback_limit() -> None:
         assert payload is not None
         assert len(payload.encode()) <= 64
     assert buttons[2].text.startswith("✅")
+
+
+def test_live_model_switch_commands() -> None:
+    # Claude and Nessy accept `/model <id>` inside a running session, so the
+    # bot can switch models without losing context. The `[1m]` suffix must
+    # survive — it selects the 1M context window.
+    assert CLAUDE_ADAPTER.live_model_command("anthropic/claude-fable-5[1m]") == (
+        "/model anthropic/claude-fable-5[1m]"
+    )
+    assert CLAUDE_ADAPTER.live_model_command(None) == "/model default"
+    assert NESSY_ADAPTER.live_model_command("tgpt/qwen") == "/model tgpt/qwen"
+    assert NESSY_ADAPTER.live_model_command(None) == "/model default"
+    # Codex honours --model at launch only — the caller must respawn instead.
+    assert CODEX_ADAPTER.live_model_command("gpt-5") is None
+    assert CODEX_ADAPTER.live_model_command(None) is None
+
+
+def test_compact_slash_commands() -> None:
+    assert CLAUDE_ADAPTER.compact_slash_command() == "/compact"
+    assert CODEX_ADAPTER.compact_slash_command() == "/compact"
+    # Gemini-style CLI compresses context via /compress.
+    assert NESSY_ADAPTER.compact_slash_command() == "/compress"
+
+
+def test_compact_command_is_bot_handled_and_reserved() -> None:
+    # A dedicated handler delivers /compact to the live tmux session, and the
+    # reservation keeps the text passthrough from also forwarding it raw.
+    assert commands.handle_compact_command is not None
+    assert "/compact" in BOT_RESERVED_COMMANDS
+    assert route_slash_command("/compact") == "bot"
+
+
+def test_public_bot_command_menu_includes_compact() -> None:
+    command_names = {command.command for command in build_bot_commands("ru")}
+    assert "compact" in command_names
+
+
+def test_update_session_model_records_live_switch(tmp_path: Path) -> None:
+    from telegram_bot.core.services.tmux_manager import TmuxManager
+    from telegram_bot.core.services.tmux_state import TmuxSessionState
+
+    manager = TmuxManager(sessions_dir=tmp_path)
+    key = (1, 2)
+    state = TmuxSessionState(
+        session_name="cc-1-2",
+        session_dir=str(tmp_path / "cc-1-2"),
+        session_id="session-abc",
+        mode="free",
+        cwd=".",
+        mcp_config="",
+        chat_id=1,
+    )
+    manager._sessions[key] = state
+
+    assert manager.update_session_model(key, "anthropic/claude-fable-5[1m]") is True
+    assert state.model == "anthropic/claude-fable-5[1m]"
+    # Unknown channel — nothing to update.
+    assert manager.update_session_model((9, 9), "x") is False
+
+
+def test_send_direct_set_processing_controls_busy_flag(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from telegram_bot.core.services.tmux_manager import TmuxManager
+    from telegram_bot.core.services.tmux_state import TmuxSessionState
+
+    manager = TmuxManager(sessions_dir=tmp_path)
+    key = (1, 2)
+    state = TmuxSessionState(
+        session_name="cc-1-2",
+        session_dir=str(tmp_path / "cc-1-2"),
+        session_id="session-abc",
+        mode="free",
+        cwd=".",
+        mcp_config="",
+        chat_id=1,
+    )
+    manager._sessions[key] = state
+
+    async def fake_safe_send(channel_key, st, prompt):
+        return True
+
+    monkeypatch.setattr(manager, "_safe_send_and_enter", fake_safe_send)
+
+    async def scenario() -> None:
+        # A control command (live /model switch) must not wedge the busy flag.
+        assert await manager.send_direct(key, "/model sonnet", set_processing=False) is True
+        assert manager.is_processing(key) is False
+        # A normal prompt still marks the channel as processing.
+        assert await manager.send_direct(key, "hello") is True
+        assert manager.is_processing(key) is True
+
+    asyncio.run(scenario())
 
 
 def test_topic_slug_is_snake_case_and_bounded() -> None:
@@ -260,7 +360,7 @@ def test_bare_model_command_is_bot_handled_and_model_with_args_reaches_tui() -> 
 def test_public_command_handlers_are_wired() -> None:
     assert commands.handle_resume is not None
     assert commands.handle_stream_mode is not None
-    assert commands.handle_mode_command is not None
+    assert commands.handle_uimode_command is not None
     assert commands.handle_engine_command is not None
     assert commands.handle_model_command is not None
     assert commands.on_model_click is not None
@@ -272,7 +372,7 @@ def test_public_bot_command_menu_is_public_only() -> None:
 
     assert "clear" in command_names
     assert "tui" in command_names
-    assert "tail" in command_names
+    assert "tail" not in command_names
     assert "new" not in command_names
     assert "day" not in command_names
 

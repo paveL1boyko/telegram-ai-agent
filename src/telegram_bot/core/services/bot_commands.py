@@ -36,8 +36,17 @@ PUBLIC_BOT_COMMANDS: tuple[LocalizedBotCommand, ...] = (
     LocalizedBotCommand("start", "Запустить бота", "Start the bot"),
     LocalizedBotCommand("clear", "Сбросить текущий чат", "Reset the current chat"),
     LocalizedBotCommand("cancel", "Отменить текущую обработку", "Cancel current processing"),
+    LocalizedBotCommand(
+        "compact",
+        "Сжать контекст текущей сессии",
+        "Compact the current session context",
+    ),
     LocalizedBotCommand("language", "Сменить язык интерфейса", "Change interface language"),
-    LocalizedBotCommand("mode", "Выбрать режим выполнения", "Choose execution mode"),
+    LocalizedBotCommand(
+        "uimode",
+        "Выбрать UI mode (regular/tmux)",
+        "Choose the UI mode (regular/tmux)",
+    ),
     LocalizedBotCommand("stream", "Выбрать режим ответов", "Choose response mode"),
     LocalizedBotCommand("engine", "Выбрать Claude Code или Codex", "Choose Claude Code or Codex"),
     LocalizedBotCommand("model", "Выбрать модель для топика", "Choose the model for this topic"),
@@ -49,11 +58,6 @@ PUBLIC_BOT_COMMANDS: tuple[LocalizedBotCommand, ...] = (
         "Reconnect tail without resetting session",
     ),
     LocalizedBotCommand("tui", "Открыть панель TUI", "Open the TUI panel"),
-    LocalizedBotCommand(
-        "tail",
-        "Открыть панель TUI (старый алиас)",
-        "Open the TUI panel (legacy alias)",
-    ),
 )
 
 

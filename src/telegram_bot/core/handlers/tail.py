@@ -2,8 +2,7 @@
 
 `/tui` captures the current tmux pane and attaches an inline keyboard for
 navigation keys, digit replies to permission dialogs, and refresh/expand/close
-controls. `/tail` is kept as an alias for one deployment cycle after the
-2026-04-23 rename. All I/O goes through `tmux` via
+controls. All I/O goes through `tmux` via
 `asyncio.to_thread(subprocess.run, [...])` using list-args (no shell) so
 command-injection is impossible.
 
@@ -167,7 +166,7 @@ async def handle_tui_button(message: Message, tmux_manager: TmuxManager) -> None
     )
 
 
-@router.message(Command("tui", "tail"))
+@router.message(Command("tui"))
 async def handle_tail_command(message: Message, tmux_manager: TmuxManager) -> None:
     """Render a TUI snapshot with an inline navigation keyboard.
 

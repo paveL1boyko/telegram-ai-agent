@@ -201,11 +201,12 @@ config. Чтобы узнать topic ID, запустите бота, созд�
 ## Topic Configuration
 
 Можно редактировать `topic_config.json` напрямую, использовать `/engine`,
-`/mode` и `/stream` внутри Telegram forum topics или попросить `topic-setup`
+`/uimode` и `/stream` внутри Telegram forum topics или попросить `topic-setup`
 skill настроить topics.
 
 Термины важны: поле config `mode` означает prompt mode. Telegram-команда
-`/mode` меняет execution mode, который хранится как `exec_mode`.
+`/uimode` меняет UI mode (транспорт), который хранится как `exec_mode`.
+Имя выбрано, чтобы не путать с `/model`.
 
 Пример:
 
@@ -261,9 +262,9 @@ Prompt files лежат в `src/telegram_bot/prompts/`.
 public repo приватные данные, секреты, личные workflows и реальный customer
 context.
 
-## Execution Modes
+## UI Modes
 
-`/mode` выбирает, как запускается agent process.
+`/uimode` выбирает, как запускается agent process.
 
 ### tmux
 
@@ -292,7 +293,7 @@ context.
 не хочется держать постоянную TUI-сессию в фоне.
 
 Private chats используют настройки по умолчанию и подходят для простого
-использования. Per-topic controls вроде `/mode`, `/stream`, `/engine` и
+использования. Per-topic controls вроде `/uimode`, `/stream`, `/engine` и
 `/resume` работают в forum topics, потому что им нужна topic-specific config
 entry.
 
@@ -325,8 +326,6 @@ entry.
   закрой диалог кнопками;
 - выйти из состояния, которое выглядит как зависшая TUI.
 
-`/tail` - legacy alias для `/tui`.
-
 ## Reply, Resume И Sessions
 
 Бот запоминает, какая agent session породила каждый ответ. Если вы отвечаете
@@ -340,8 +339,9 @@ reply на старое сообщение бота, он может напра�
 топика перед resume. Если live tmux session нужно заменить, она может быть
 остановлена в рамках такого switch.
 
-Slash commands устроены отдельно: в tmux topics non-bot commands вроде `/model`
-или `/compact` отправляются в live TUI, а не в historical session из reply.
+Slash commands устроены отдельно: в tmux topics non-bot commands вроде
+`/model sonnet` или `/mcp` отправляются в live TUI, а не в historical session
+из reply.
 
 `/clear` начинает свежий logical context для текущего topic. В tmux mode бот
 сбрасывает или пересоздает tmux session в зависимости от текущего состояния.
@@ -352,22 +352,27 @@ Slash commands устроены отдельно: в tmux topics non-bot command
 - `/start`: проверить, что бот отвечает, и показать базовую клавиатуру.
 - `/clear`: сбросить сессию текущего topic.
 - `/cancel`: отменить текущую обработку.
+- `/compact`: только tmux-режим; сжать контекст живой сессии, не теряя нить
+  разговора.
 - `/language`: показать или сменить язык UI, например `/language ru`.
-- `/mode`: только forum topics; выбрать `tmux` или `subprocess`. При
+- `/uimode`: только forum topics; выбрать `tmux` или `subprocess`. При
   переключении с `tmux` на `subprocess` активная tmux session останавливается.
 - `/engine`: только forum topics; выбрать Claude Code или Codex. Смена engine
   сбрасывает активную session.
+- `/model`: только forum topics; выбрать override модели для topic. Для живой
+  tmux-сессии Claude Code или Nessy новая модель применяется прямо внутри
+  работающей сессии (`/model <id>` в TUI pane), контекст сохраняется; Codex и
+  топики без живой сессии подхватывают модель при следующем запуске.
 - `/stream`: только forum topics; выбрать `verbose`, `live` или `minimal`.
 - `/resume`: только forum topics; возобновить сохраненную tmux session для cwd
   текущего topic.
 - `/tui`: показать и управлять живой tmux TUI.
-- `/tail`: legacy alias для `/tui`.
 - `/kill`: остановить активную tmux session и освободить ресурсы.
 
 Рекомендации:
 
-- Настоящая разработка: `/mode` -> `tmux`, `/stream` -> `live`.
-- Короткие разовые задачи: `/mode` -> `subprocess`, `/stream` -> `minimal` или
+- Настоящая разработка: `/uimode` -> `tmux`, `/stream` -> `live`.
+- Короткие разовые задачи: `/uimode` -> `subprocess`, `/stream` -> `minimal` или
   `live`.
 - Старая session больше не нужна: `/kill`.
 

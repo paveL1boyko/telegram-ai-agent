@@ -57,11 +57,11 @@ async def handle_text(
         return
 
     # Slash-command forwarding for tmux topics (Decision 9, Wave 3).
-    # Non-whitelist slash commands (`/model`, `/compact`, `/mcp`, …) go
+    # Non-whitelist slash commands (`/model sonnet`, `/mcp`, …) go
     # directly to the CC TUI via send-keys, bypassing the forward batcher
     # and MessageQueue. Bot-reserved commands from BOT_RESERVED_COMMANDS
-    # (`/new`, `/kill`, `/cancel`, …) never reach this handler — aiogram
-    # routes them by Command() filter first. Reply-to-resume is not applied:
+    # (`/new`, `/kill`, `/cancel`, `/compact`, …) never reach this handler —
+    # aiogram routes them by Command() filter first. Reply-to-resume is not applied:
     # slash commands logically belong to the currently-live TUI, not to
     # whatever session the reply-target references.
     if (

@@ -46,11 +46,15 @@ class Settings(BaseSettings):
     # bot only validates syntax, never the id itself. A trailing `[1m]` is the
     # CLI's 1M-context flag and is preserved verbatim.
     model_presets: list[str] = [
-        "anthropic/claude-opus-4-7[1m]",
         "anthropic/claude-fable-5[1m]",
         "openrouter/anthropic/claude-fable-5[1m]",
         "openrouter/moonshotai/kimi-k3[1m]",
         "openrouter/qwen/qwen3.8-max[1m]",
+        "openai/gpt-6-astra[1m]",
+        "openrouter/openai/gpt-6-astra[1m]",
+        "openrouter/openai/gpt-5.5[1m]",
+        "openrouter/x-ai/grok-4.6[1m]",
+        "xai/grok-4.6[1m]",
     ]
 
 
