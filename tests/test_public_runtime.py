@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC
 from pathlib import Path
 
 from aiogram.filters import Command, CommandObject
@@ -396,3 +397,85 @@ def test_mcp_bot_server_imports() -> None:
     assert hasattr(module, "send_image")
     assert hasattr(module, "send_document")
     assert not hasattr(module, "send_file")
+
+
+async def test_tui_button_always_opens_fresh_panel_and_deletes_stale_in_background(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Open-first button: press => new panel immediately, stale panel + trigger
+    deleted by background tasks (previously the press only closed the stale
+    panel and opened nothing — the "button did nothing" complaint)."""
+    import asyncio
+    import subprocess as real_subprocess
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from aiogram.types import Chat, Message
+
+    from telegram_bot.core.handlers import tail as tail_module
+    from telegram_bot.core.services.tmux_manager import TmuxManager
+    from telegram_bot.core.services.tmux_state import TmuxSessionState
+
+    manager = TmuxManager(sessions_dir=tmp_path)
+    key = (1, 2)
+    manager._sessions[key] = TmuxSessionState(
+        session_name="cc-1-2",
+        session_dir=str(tmp_path / "cc-1-2"),
+        session_id="session-abc",
+        mode="free",
+        cwd=".",
+        mcp_config="",
+        chat_id=1,
+    )
+    monkeypatch.setattr(manager, "_tmux_alive", lambda name: True)
+    # Stale panel registered by an earlier press, far up the history.
+    manager.set_tui_panel(key, 111)
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        return SimpleNamespace(stdout="claude > pane snapshot")
+
+    monkeypatch.setattr(
+        tail_module,
+        "subprocess",
+        SimpleNamespace(run=fake_run, CalledProcessError=real_subprocess.CalledProcessError),
+    )
+
+    deleted: list[int] = []
+    answers: list[tuple[str, dict]] = []
+
+    class FakeBot:
+        async def delete_message(self, chat_id: int, message_id: int) -> None:
+            deleted.append(message_id)
+
+    sent_panel = Message(
+        message_id=222,
+        date=datetime.now(UTC),
+        chat=Chat(id=1, type="supergroup"),
+    )
+
+    class FakeTrigger:
+        message_id = 100
+        message_thread_id = 2
+        chat = SimpleNamespace(id=1)
+        bot = FakeBot()
+
+        async def answer(self, text: str, **kwargs):
+            answers.append((text, kwargs))
+            return sent_panel
+
+    await tail_module.handle_tui_button(FakeTrigger(), manager)
+    # Drain the fire-and-forget cleanup tasks.
+    await asyncio.gather(*tail_module._background_tasks)
+
+    # New panel captured, sent, and registered — a single press.
+    assert captured_cmds and captured_cmds[0][1] == "capture-pane"
+    assert len(answers) == 1
+    assert "<pre>" in answers[0][0]
+    assert answers[0][1].get("reply_markup") is not None
+    assert manager._tui_panel_messages[key] == 222
+    # Trigger message and the stale panel both deleted in the background;
+    # the fresh panel obviously stays.
+    assert sorted(deleted) == [100, 111]

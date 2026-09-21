@@ -25,7 +25,7 @@ import logging
 import subprocess
 from collections.abc import Callable
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
@@ -101,6 +101,31 @@ _SEND_KEYS_MAP: dict[str, list[str]] = {
 
 _RECOVERY_TAIL_ACTIONS = {"ent", "num0", "num1", "num2", "num3"}
 
+# Strong references to fire-and-forget cleanup tasks. asyncio only keeps a
+# weak reference to tasks, so an unreferenced task can be GC'd mid-flight;
+# the set + done_callback pattern is the documented workaround.
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _delete_message_quiet(bot: Bot, chat_id: int, message_id: int) -> None:
+    """Best-effort delete — the message may already be gone (expired, /new)."""
+    with contextlib.suppress(Exception):
+        await bot.delete_message(chat_id, message_id)
+
+
+def _spawn_message_delete(bot: Bot | None, chat_id: int, message_id: int) -> None:
+    """Schedule a background delete without blocking the caller.
+
+    Used by the open-first TUI button flow: the fresh panel is sent
+    immediately while the stale panel / trigger message is removed
+    out-of-band a moment later.
+    """
+    if bot is None:
+        return
+    task = asyncio.create_task(_delete_message_quiet(bot, chat_id, message_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 def _capture_pane_cmd(session_name: str) -> list[str]:
     return [
@@ -140,22 +165,19 @@ def _resolve_session_name(tmux_manager: TmuxManager, key: ChannelKey) -> str | N
 
 @router.message(F.text == t("ui.btn_tui"))
 async def handle_tui_button(message: Message, tmux_manager: TmuxManager) -> None:
-    """Reply-button shortcut for /tui with toggle + cleanup behaviour.
+    """Reply-button shortcut for /tui — open-first, cleanup in background.
 
-    Always deletes the trigger «TUI 🖥» message to keep chat history clean.
-    If a TUI panel is already open for this topic, closes it (toggle off).
-    Otherwise opens a new panel (toggle on).
+    Every press immediately renders a fresh panel at the bottom of the
+    topic; the trigger «TUI 🖥» message and any previously registered
+    panel (possibly far up the history, possibly already inaccessible)
+    are deleted by background tasks so they never delay the open.
+
+    The previous behaviour was a toggle: when a panel was registered, the
+    press silently deleted that stale panel *without* opening a new one —
+    users experienced it as "the button did nothing" and had to press
+    twice. Closing is the ✖ button on the panel itself.
     """
-    key = channel_key(message)
-
-    with contextlib.suppress(Exception):
-        await message.delete()
-
-    existing_id = tmux_manager.pop_tui_panel(key)
-    if existing_id is not None:
-        with contextlib.suppress(Exception):
-            await message.bot.delete_message(message.chat.id, existing_id)  # type: ignore[union-attr]
-        return
+    _spawn_message_delete(message.bot, message.chat.id, message.message_id)
 
     await _handle_tail_entry(
         message,
@@ -194,8 +216,21 @@ async def _handle_tail_entry(
     Both surface the same TUI snapshot panel; the only difference is the
     `source` recorded in TUI_ALERT_AUDIT — the operator can see whether
     the panel came from a typed command or a reply-keyboard tap.
+
+    Any previously registered panel (from an earlier /tui press or from
+    the modal watchdog) is popped atomically and deleted in the
+    background: a new press always means "show me the TUI *now*", and an
+    old snapshot lingering high in the history is stale noise — after 48h
+    its inline keyboard is dead anyway. `pop_tui_panel` is the single
+    atomic claim point, so a watchdog-registered panel can never be
+    deleted twice or race a concurrent open.
     """
     key = channel_key(message)
+
+    stale_id = tmux_manager.pop_tui_panel(key)
+    if stale_id is not None:
+        _spawn_message_delete(message.bot, message.chat.id, stale_id)
+
     if not tmux_manager.is_active(key):
         await message.answer(t("ui.tail_unavailable"))
         return
