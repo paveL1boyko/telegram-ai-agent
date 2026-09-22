@@ -30,6 +30,7 @@ from telegram_bot.core.middleware.auth import AuthMiddleware
 from telegram_bot.core.services.bot_commands import setup_bot_commands
 from telegram_bot.core.services.claude import SessionManager
 from telegram_bot.core.services.message_queue import MessageQueue
+from telegram_bot.core.services.model_autoselect import ModelAutoselect
 from telegram_bot.core.services.picker_store import PickerStore
 from telegram_bot.core.services.tmux_manager import TmuxManager
 from telegram_bot.core.services.topic_config import TopicConfig
@@ -107,7 +108,20 @@ async def _start() -> None:
     tmux_manager.wire_live_buffer(bot=bot, topic_config=topic_config)
     tmux_manager.restore_all()
     tmux_manager.start_modal_watchdog()
-    session_manager = SessionManager(settings, topic_config=topic_config)
+    model_assign_path = Path(settings.model_assign_path)
+    if not model_assign_path.is_absolute():
+        model_assign_path = Path(settings.project_root) / model_assign_path
+    model_autoselect = ModelAutoselect(
+        command=settings.model_autoselect_cmd,
+        ledger_path=model_assign_path,
+        refresh_sec=settings.model_autoselect_refresh_sec,
+        timeout_sec=settings.model_autoselect_timeout_sec,
+    )
+    session_manager = SessionManager(
+        settings,
+        topic_config=topic_config,
+        model_autoselect=model_autoselect,
+    )
     transcriber = Transcriber(settings)
     forward_batcher = ForwardBatcher(bot=bot)
 
@@ -185,9 +199,17 @@ async def _start() -> None:
 
     cleanup_task = asyncio.create_task(_periodic_tmp_cleanup())
 
+    # Warm the healthy-model pool before the first message needs it: resolution
+    # is synchronous and an empty pool silently means "no --model".
+    prime_task: asyncio.Task[None] | None = None
+    if model_autoselect.enabled:
+        prime_task = asyncio.create_task(model_autoselect.prime())
+
     async def _on_shutdown() -> None:
         logger.info("Shutting down: cleaning up sessions...")
         cleanup_task.cancel()
+        if prime_task is not None:
+            prime_task.cancel()
         await forward_batcher.shutdown()
         await message_queue.shutdown()
         await session_manager.shutdown()

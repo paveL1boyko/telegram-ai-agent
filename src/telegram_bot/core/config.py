@@ -46,16 +46,38 @@ class Settings(BaseSettings):
     # bot only validates syntax, never the id itself. A trailing `[1m]` is the
     # CLI's 1M-context flag and is preserved verbatim.
     model_presets: list[str] = [
+        "opus[1m]",
+        # the two namespaces spell this model differently: the plain one uses
+        # dashes, the routed one dots. A dotted `anthropic/...` id answers
+        # "model not found".
+        "anthropic/claude-opus-4-7[1m]",
+        "openrouter/anthropic/claude-opus-4.7[1m]",
+        "anthropic/claude-opus-5[1m]",
+        "openrouter/anthropic/claude-opus-5[1m]",
         "anthropic/claude-fable-5[1m]",
         "openrouter/anthropic/claude-fable-5[1m]",
-        "openrouter/moonshotai/kimi-k3[1m]",
         "openrouter/qwen/qwen3.8-max[1m]",
-        "openai/gpt-6-astra[1m]",
-        "openrouter/openai/gpt-6-astra[1m]",
-        "openrouter/openai/gpt-5.5[1m]",
+        "openrouter/moonshotai/kimi-k3[1m]",
         "openrouter/x-ai/grok-4.6[1m]",
-        "xai/grok-4.6[1m]",
+        "x-ai/grok-4.6[1m]",
+        "openrouter/openai/gpt-5.5[1m]",
+        "openai/gpt-5.5[1m]",
+        "openrouter/openai/gpt-6-astra[1m]",
+        "openai/gpt-6-astra[1m]",
     ]
+    # Autoselect: a topic pinned to the model `auto` gets one assigned from
+    # whatever `MODEL_AUTOSELECT_CMD` reports as currently usable. The command
+    # must print model ids one per line, best first, and nothing else on stdout;
+    # a non-zero exit, a timeout or empty output disables assignment for that
+    # round and leaves the engine on its own default. Empty = feature off, which
+    # keeps this a generic hook: every gateway-specific detail lives in the
+    # command, not here.
+    model_autoselect_cmd: str = ""
+    model_autoselect_refresh_sec: float = 600.0
+    model_autoselect_timeout_sec: float = 30.0
+    # topic -> assigned model, so a restart keeps topics on their models and
+    # new topics still land on the least-used one.
+    model_assign_path: str = "./model_assign.json"
 
 
 @functools.lru_cache(maxsize=1)

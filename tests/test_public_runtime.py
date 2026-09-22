@@ -155,8 +155,9 @@ def test_model_override_keeps_routing_prefix_and_context_suffix() -> None:
     assert normalize_model_override("openrouter/openai/gpt-5.5[1m]") == (
         "openrouter/openai/gpt-5.5[1m]"
     )
-    assert normalize_model_override("xai/grok-4.6[1m]") == "xai/grok-4.6[1m]"
+    assert normalize_model_override("x-ai/grok-4.6[1m]") == "x-ai/grok-4.6[1m]"
     assert normalize_model_override("openai/gpt-6-astra[1m]") == "openai/gpt-6-astra[1m]"
+    assert normalize_model_override("opus[1m]") == "opus[1m]"
     assert normalize_model_override("claude-fable-5") == "claude-fable-5"
     assert normalize_model_override("  claude-fable-5  ") == "claude-fable-5"
     assert normalize_model_override("") is None
@@ -212,8 +213,25 @@ def test_claude_adapter_pins_model_on_start_and_resume() -> None:
 
 def test_model_presets_are_valid_overrides() -> None:
     settings = Settings(_env_file=None, telegram_bot_token="test-token")
+    expected = [
+        "opus[1m]",
+        "anthropic/claude-opus-4-7[1m]",
+        "openrouter/anthropic/claude-opus-4.7[1m]",
+        "anthropic/claude-opus-5[1m]",
+        "openrouter/anthropic/claude-opus-5[1m]",
+        "anthropic/claude-fable-5[1m]",
+        "openrouter/anthropic/claude-fable-5[1m]",
+        "openrouter/qwen/qwen3.8-max[1m]",
+        "openrouter/moonshotai/kimi-k3[1m]",
+        "openrouter/x-ai/grok-4.6[1m]",
+        "x-ai/grok-4.6[1m]",
+        "openrouter/openai/gpt-5.5[1m]",
+        "openai/gpt-5.5[1m]",
+        "openrouter/openai/gpt-6-astra[1m]",
+        "openai/gpt-6-astra[1m]",
+    ]
 
-    assert settings.model_presets
+    assert settings.model_presets == expected
     for preset in settings.model_presets:
         assert normalize_model_override(preset) == preset
 
@@ -225,13 +243,26 @@ def test_model_keyboard_offers_default_reset_and_fits_callback_limit() -> None:
     buttons = [button for row in markup.inline_keyboard for button in row]
     payloads = [button.callback_data for button in buttons]
 
-    assert payloads == ["model:default", "model:0", "model:1"]
+    assert payloads == ["model:default", "model:auto", "model:0", "model:1"]
     # Telegram rejects callback_data over 64 bytes; model ids are too long
     # to embed, hence the index indirection.
     for payload in payloads:
         assert payload is not None
         assert len(payload.encode()) <= 64
-    assert buttons[2].text.startswith("✅")
+    assert buttons[3].text.startswith("✅")
+
+
+def test_model_keyboard_marks_the_auto_row_when_the_topic_is_in_rotation() -> None:
+    presets = ["anthropic/claude-fable-5"]
+
+    markup = model_keyboard(presets, current_model="auto")
+    buttons = [button for row in markup.inline_keyboard for button in row]
+
+    # `auto` is not a preset, so no preset row may claim the checkmark
+    assert buttons[1].callback_data == "model:auto"
+    assert buttons[1].text.startswith("✅")
+    assert not buttons[0].text.startswith("✅")
+    assert not buttons[2].text.startswith("✅")
 
 
 def test_live_model_switch_commands() -> None:

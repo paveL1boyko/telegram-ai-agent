@@ -153,6 +153,8 @@ Notes:
 - `BOT_LANG`: `en` or `ru`. Restart the bot after changing it.
 - `DEFAULT_CWD`: default working directory for unconfigured topics.
 - `DEEPGRAM_API_KEY`: leave empty if you do not need voice messages.
+- `MODEL_AUTOSELECT_CMD`: optional. Enables the `Auto` row in `/model` — see
+  [Model autoselect](#model-autoselect).
 
 Run in the foreground:
 
@@ -292,6 +294,44 @@ not want a persistent TUI session running in the background.
 Private chats use default settings and are good for simple use. Per-topic
 controls such as `/uimode`, `/stream`, `/engine`, and `/resume` work in forum
 topics, because they need a topic-specific config entry.
+
+## Model Autoselect
+
+`/model` normally pins one model id per topic. Its `Auto` row instead lets the
+bot choose, which is useful when your gateway serves several models and some of
+them are periodically unavailable or rate-limited.
+
+The bot does not probe any gateway itself. Point `MODEL_AUTOSELECT_CMD` at a
+command that prints the model ids currently worth using, one per line, best
+first:
+
+```env
+MODEL_AUTOSELECT_CMD=/path/to/healthy-models.sh
+MODEL_AUTOSELECT_REFRESH_SEC=600
+MODEL_AUTOSELECT_TIMEOUT_SEC=30
+MODEL_ASSIGN_PATH=./model_assign.json
+```
+
+Everything provider-specific — endpoints, auth, which HTTP status means "dead
+route" rather than "throttled" — lives in that command, so the bot stays generic.
+
+Behaviour:
+
+- topics are spread across *distinct* models: `claude-x` and
+  `vendor/claude-x` count as one model, since two spellings of one route
+  usually share one quota;
+- with more topics than models, the least-used model is reused rather than
+  leaving a topic unassigned;
+- a topic keeps its model while that model stays in the command's output, so a
+  conversation never changes model between messages; it is re-picked once the
+  model drops out;
+- assignments are stored in `MODEL_ASSIGN_PATH` and survive a restart;
+- the feature fails open: if the command is missing, slow, failing, or prints
+  nothing, the topic starts with no `--model` flag and the CLI uses its own
+  default. Leave `MODEL_AUTOSELECT_CMD` empty to disable the `Auto` row.
+
+Choosing `Auto` applies on the next session start — unlike a pinned id, there is
+nothing to hand to a running session.
 
 ## Stream Modes
 
@@ -442,6 +482,7 @@ Do not commit runtime files:
 - `topic_config.json`
 - `session_mapping.json`
 - `channel_sessions.json`
+- `model_assign.json`
 - `tmux_sessions/`
 - `data/`
 - `.mcp*.json`
