@@ -396,7 +396,28 @@ def test_public_command_handlers_are_wired() -> None:
     assert commands.handle_engine_command is not None
     assert commands.handle_model_command is not None
     assert commands.on_model_click is not None
+    assert commands.handle_sendfile_command is not None
     assert handle_tail_command is not None
+
+
+def test_sendfile_validation(tmp_path) -> None:
+    error = commands._sendfile_error("relative/path.apk")
+    assert error is not None and error[0] == "ui.sendfile_not_absolute"
+
+    error = commands._sendfile_error(str(tmp_path / "missing.apk"))
+    assert error is not None and error[0] == "ui.sendfile_not_found"
+
+    artifact = tmp_path / "app.apk"
+    artifact.write_bytes(b"apk")
+    assert commands._sendfile_error(str(artifact)) is None
+
+    # Whole-string path wins when the file exists, even with spaces.
+    spaced = tmp_path / "my build.apk"
+    spaced.write_bytes(b"apk")
+    assert commands._sendfile_split_args(str(spaced)) == (str(spaced), "")
+    path, caption = commands._sendfile_split_args(f"{artifact} release build")
+    assert path == str(artifact)
+    assert caption == "release build"
 
 
 def test_public_bot_command_menu_is_public_only() -> None:

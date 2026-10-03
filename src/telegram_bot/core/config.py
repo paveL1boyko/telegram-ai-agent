@@ -58,7 +58,7 @@ class Settings(BaseSettings):
         "openrouter/anthropic/claude-fable-5[1m]",
         "openrouter/qwen/qwen3.8-max[1m]",
         "openrouter/moonshotai/kimi-k3[1m]",
-        "openrouter/x-ai/grok-4.6[1m]",
+        "openrouter/x-ai/grok-4-6[1m]",
         "x-ai/grok-4.6[1m]",
         "openrouter/openai/gpt-5.5[1m]",
         "openai/gpt-5.5[1m]",

@@ -14,8 +14,14 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from aiogram.types.inaccessible_message import InaccessibleMessage
 
 from telegram_bot.core.config import Settings
@@ -866,21 +872,22 @@ def _model_picker_caption(model: str | None) -> str:
     return t("ui.model_picker_caption", model=html.escape(_model_label(model)))
 
 
-async def _refresh_model_picker(
-    callback: CallbackQuery, presets: list[str], new_model: str | None
-) -> None:
-    """Re-render the picker so the visible checkmark matches the saved value."""
+async def _close_model_picker(callback: CallbackQuery) -> None:
+    """Delete the picker message once a choice has been made.
+
+    Deletion can fail (message older than 48h, missing delete rights), so the
+    fallback strips the keyboard instead, leaving a dead picker unclickable.
+    """
     message = callback.message
     if message is None or isinstance(message, InaccessibleMessage):
         return
     try:
-        await message.edit_text(
-            _model_picker_caption(new_model),
-            reply_markup=model_keyboard(presets, new_model),
-            parse_mode="HTML",
-        )
+        await message.delete()
     except Exception:
-        logger.debug("Failed to refresh model picker", exc_info=True)
+        try:
+            await message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("Failed to close model picker", exc_info=True)
 
 
 async def _show_model_picker(
@@ -983,6 +990,7 @@ async def on_model_click(
             return
 
     if new_model == current.model:
+        await _close_model_picker(callback)
         await callback.answer(t("ui.model_already"))
         return
 
@@ -1016,7 +1024,7 @@ async def on_model_click(
                     current.model,
                     new_model,
                 )
-                await _refresh_model_picker(callback, presets, new_model)
+                await _close_model_picker(callback)
                 await callback.answer(t("ui.model_changed", model=label))
                 await callback.message.answer(t("ui.model_changed_live", model=label))
                 return
@@ -1029,7 +1037,7 @@ async def on_model_click(
                 current.engine,
                 new_model,
             )
-            await _refresh_model_picker(callback, presets, new_model)
+            await _close_model_picker(callback)
             await callback.answer(t("ui.model_changed", model=label))
             await callback.message.answer(t("ui.model_live_failed", model=label))
             return
@@ -1050,9 +1058,67 @@ async def on_model_click(
         current.model,
         new_model,
     )
-    await _refresh_model_picker(callback, presets, new_model)
+    await _close_model_picker(callback)
     await callback.answer(t("ui.model_changed", model=label))
     if is_auto_model(new_model):
         await callback.message.answer(t("ui.model_auto_pending"))
     else:
         await callback.message.answer(t("ui.model_changed_new_session", model=label))
+
+
+_SENDFILE_MAX_BYTES = 50 * 1024 * 1024  # Telegram Bot API upload limit
+
+
+def _sendfile_split_args(args: str) -> tuple[str, str]:
+    """Split `/sendfile` args into (path, caption).
+
+    A path containing spaces is only recognized when the whole argument
+    string is an existing file; otherwise the first whitespace separates
+    the path from the caption.
+    """
+    if Path(args).expanduser().is_file():
+        return args, ""
+    path, _, caption = args.partition(" ")
+    return path, caption.strip()
+
+
+def _sendfile_error(raw_path: str) -> tuple[str, dict[str, object]] | None:
+    """Validation error for `/sendfile` as (message key, format args), or None."""
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        return "ui.sendfile_not_absolute", {}
+    if not path.is_file():
+        return "ui.sendfile_not_found", {"path": raw_path}
+    size = path.stat().st_size
+    if size > _SENDFILE_MAX_BYTES:
+        return "ui.sendfile_too_big", {"size": size // (1024 * 1024)}
+    return None
+
+
+@router.message(Command("sendfile"))
+async def handle_sendfile_command(message: Message, command: CommandObject) -> None:
+    """Upload a file from the host disk into the current chat/topic.
+
+    The bot process performs the upload itself, so this works even when the
+    engine session has no `bot` MCP server — e.g. managed CLI builds whose
+    signed policy blocks extra MCP servers (see `claude_mcp_config_flags`).
+    An agent that built an artifact only needs to report its absolute path.
+    """
+    args = (command.args or "").strip()
+    if not args:
+        await message.answer(t("ui.sendfile_usage"), parse_mode="HTML")
+        return
+    raw_path, caption = _sendfile_split_args(args)
+    error = _sendfile_error(raw_path)
+    if error is not None:
+        key, fmt = error
+        await message.answer(t(key, **fmt))
+        return
+    try:
+        await message.answer_document(
+            FSInputFile(Path(raw_path).expanduser()),
+            caption=caption or None,
+        )
+    except Exception as exc:
+        logger.warning("sendfile failed for %s", raw_path, exc_info=True)
+        await message.answer(t("ui.sendfile_failed", error=str(exc)[:200]))

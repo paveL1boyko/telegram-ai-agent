@@ -137,6 +137,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ui.model_already": "Already selected",
         "ui.model_invalid": "Invalid model",
+        "ui.sendfile_usage": (
+            "Usage: /sendfile &lt;absolute path&gt; [caption]\n\n"
+            "The bot uploads the file from disk to this chat."
+        ),
+        "ui.sendfile_not_found": "⚠️ File not found: {path}",
+        "ui.sendfile_not_absolute": "⚠️ Use an absolute path (starting with /)",
+        "ui.sendfile_too_big": "⚠️ File is too big: {size} MB (Telegram limit is 50 MB)",
+        "ui.sendfile_failed": "⚠️ Failed to send the file: {error}",
         "ui.model_no_presets": "⚠️ No model presets configured (MODEL_PRESETS)",
         "ui.model_not_in_forum": "⚠️ /model works only in forum topics",
         "ui.model_write_failed": "Failed to save model settings",
@@ -404,6 +412,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ui.model_already": "Уже выбрано",
         "ui.model_invalid": "Неизвестная модель",
+        "ui.sendfile_usage": (
+            "Использование: /sendfile &lt;абсолютный путь&gt; [подпись]\n\n"
+            "Бот загрузит файл с диска в этот чат."
+        ),
+        "ui.sendfile_not_found": "⚠️ Файл не найден: {path}",
+        "ui.sendfile_not_absolute": "⚠️ Нужен абсолютный путь (начинается с /)",
+        "ui.sendfile_too_big": "⚠️ Файл слишком большой: {size} МБ (лимит Telegram — 50 МБ)",
+        "ui.sendfile_failed": "⚠️ Не удалось отправить файл: {error}",
         "ui.model_no_presets": "⚠️ Список моделей не настроен (MODEL_PRESETS)",
         "ui.model_not_in_forum": "⚠️ /model работает только внутри форум-топиков",
         "ui.model_write_failed": "Не удалось сохранить настройки модели",

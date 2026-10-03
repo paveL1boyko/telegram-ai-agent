@@ -12,6 +12,10 @@ context:
 
 - `.claude/skills/project-knowledge/SKILL.md`
 
+Before adding a command, picker, text, or MCP capability, read
+`docs/feature-guide.md` — it maps where each concern lives and the established
+handler/keyboard/i18n patterns.
+
 Use `.claude/skills/bot-setup/SKILL.md` for installation, systemd autostart,
 language, commands, and operator troubleshooting. Use
 `.claude/skills/topic-setup/SKILL.md` for Telegram forum topic wiring.
