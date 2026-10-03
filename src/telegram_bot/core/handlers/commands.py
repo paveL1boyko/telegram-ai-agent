@@ -42,7 +42,6 @@ from telegram_bot.core.keyboards import (
 from telegram_bot.core.messages import reset_lang_cache, t
 from telegram_bot.core.services.claude import SessionManager
 from telegram_bot.core.services.message_queue import MessageQueue
-from telegram_bot.core.services.model_autoselect import AUTO_MODEL, is_auto_model
 from telegram_bot.core.services.picker_store import PickerState, PickerStore
 from telegram_bot.core.services.providers import engine_display_name, get_adapter
 from telegram_bot.core.services.resume_listing import (
@@ -863,8 +862,6 @@ async def on_engine_click(
 
 def _model_label(model: str | None) -> str:
     """Human-facing name for a model override; `None` means the CLI default."""
-    if is_auto_model(model):
-        return t("ui.model_auto_label")
     return model if model else t("ui.model_default_label")
 
 
@@ -972,11 +969,6 @@ async def on_model_click(
     presets = settings.model_presets
     if raw_value == "default":
         new_model: str | None = None
-    elif raw_value == "auto":
-        if not session_manager.model_autoselect_enabled:
-            await callback.answer(t("ui.model_auto_disabled"), show_alert=True)
-            return
-        new_model = AUTO_MODEL
     else:
         # The keyboard may predate a MODEL_PRESETS edit, so the index is
         # re-checked against the live list instead of trusted.
@@ -1007,11 +999,7 @@ async def on_model_click(
     # so the command lands in the input bar, not mid-turn. set_processing=False:
     # a model switch is not a processing turn (no result event would ever
     # clear the flag).
-    #
-    # `auto` is excluded: there is no id to send: the sentinel only means
-    # something once autoselect expands it at the next session start, and
-    # `/model auto` would reach the CLI as a literal.
-    if tmux_manager.is_active(key) and not is_auto_model(new_model):
+    if tmux_manager.is_active(key):
         live_command = get_adapter(current.engine).live_model_command(new_model)
         if live_command is not None:
             if await tmux_manager.send_direct(key, live_command, set_processing=False):
@@ -1060,10 +1048,7 @@ async def on_model_click(
     )
     await _close_model_picker(callback)
     await callback.answer(t("ui.model_changed", model=label))
-    if is_auto_model(new_model):
-        await callback.message.answer(t("ui.model_auto_pending"))
-    else:
-        await callback.message.answer(t("ui.model_changed_new_session", model=label))
+    await callback.message.answer(t("ui.model_changed_new_session", model=label))
 
 
 _SENDFILE_MAX_BYTES = 50 * 1024 * 1024  # Telegram Bot API upload limit

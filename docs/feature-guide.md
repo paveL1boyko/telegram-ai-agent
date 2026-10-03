@@ -95,8 +95,9 @@ raising. Add a streaming label in `cc_events.py` and both locales in
 
 `tests/test_public_runtime.py` pins public behavior; notable couplings:
 
-- `test_model_presets_are_valid_overrides` asserts the exact
-  `Settings.model_presets` list — change `config.py` and the test together.
+- `test_model_presets_are_valid_overrides` runs every `Settings.model_presets`
+  entry through `normalize_model_override` — new presets must stay round-trip
+  clean.
 - Reply-keyboard button texts are contract surface for handlers registered on
   `F.text == t("ui.btn_*")`.
 

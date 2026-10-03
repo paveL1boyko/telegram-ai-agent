@@ -121,15 +121,6 @@ MESSAGES: dict[str, dict[str, str]] = {
             " and resume. A trailing <code>[1m]</code> keeps the 1M context window."
         ),
         "ui.model_default_label": "CLI default",
-        "ui.model_auto_label": "Auto (healthy model)",
-        "ui.model_auto_disabled": (
-            "⚠️ Autoselect is off — set MODEL_AUTOSELECT_CMD to a command that"
-            " prints usable model ids, best first"
-        ),
-        "ui.model_auto_pending": (
-            "Model: auto.\n\nApplied on the next session start — the bot assigns"
-            " one of the models the gateway currently serves."
-        ),
         "ui.model_changed": "Model: {model}",
         "ui.model_changed_new_session": (
             "Model: {model}.\n\nActive session was reset. The next message"
@@ -396,15 +387,6 @@ MESSAGES: dict[str, dict[str, str]] = {
             " старте и resume. Суффикс <code>[1m]</code> сохраняет контекст в 1M."
         ),
         "ui.model_default_label": "Дефолт CLI",
-        "ui.model_auto_label": "Авто (рабочая модель)",
-        "ui.model_auto_disabled": (
-            "⚠️ Автоподбор выключен — задайте MODEL_AUTOSELECT_CMD: команду,"
-            " которая печатает рабочие модели, лучшая первой"
-        ),
-        "ui.model_auto_pending": (
-            "Модель — авто.\n\nПрименится при следующем старте сессии: бот"
-            " назначит одну из моделей, которые сейчас отдаёт гейтвей."
-        ),
         "ui.model_changed": "Модель: {model}",
         "ui.model_changed_new_session": (
             "Модель — {model}.\n\nАктивная сессия сброшена. Следующее сообщение"

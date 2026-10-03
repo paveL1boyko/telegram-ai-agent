@@ -24,7 +24,6 @@ from typing import Any, Literal, Protocol
 
 from telegram_bot.core.services.cc_events import StreamEvent, _tool_status
 from telegram_bot.core.services.codex_mcp import build_codex_mcp_config_args
-from telegram_bot.core.services.model_autoselect import is_auto_model
 from telegram_bot.core.services.topic_config import normalize_model_override
 from telegram_bot.core.tui.modal_detect import is_modal_present as _claude_is_modal_present
 from telegram_bot.core.tui.paths import _SESSION_ID_RE
@@ -373,7 +372,8 @@ class CodexAdapter:
             "--cd",
             cwd,
         ]
-        cmd.extend(_model_argv(model))
+        if model:
+            cmd.extend(["--model", model])
         return cmd
 
     def build_tui_resume(
@@ -395,7 +395,8 @@ class CodexAdapter:
             "--cd",
             cwd,
         ]
-        cmd.extend(_model_argv(model))
+        if model:
+            cmd.extend(["--model", model])
         return cmd
 
     def parse_tui_event(self, raw: str) -> TuiParseResult:
@@ -644,23 +645,10 @@ def is_managed_claude_binary(binary: str) -> bool:
     return Path(binary).name in MANAGED_CLAUDE_BINARIES
 
 
-def _model_argv(model: str | None) -> list[str]:
-    """`--model` argv fragment, empty when the topic pins no model.
-
-    Also the last line of defence for the `auto` sentinel: autoselect resolves
-    it in `SessionManager.resolve_model` long before argv is built, but a stale
-    tmux state or a hand-edited topic_config.json could still carry the literal
-    through, and no CLI knows a model called `auto`.
-    """
-    normalized = normalize_model_override(model)
-    if normalized is None or is_auto_model(normalized):
-        return []
-    return ["--model", normalized]
-
-
 def _claude_model_flag(model: str | None) -> list[str]:
-    """`--model` argv fragment for the Claude adapters."""
-    return _model_argv(model)
+    """`--model` argv fragment, empty when the topic pins no model."""
+    normalized = normalize_model_override(model)
+    return ["--model", normalized] if normalized else []
 
 
 def claude_permission_flags(binary: str) -> list[str]:
@@ -941,7 +929,8 @@ class NessyAdapter:
             "--channel",
             "CI",
         ]
-        cmd.extend(_model_argv(model))
+        if model:
+            cmd.extend(["--model", model])
         # Nessy doesn't have --cd flag, so we rely on tmux working directory
         return cmd
 
@@ -963,7 +952,8 @@ class NessyAdapter:
             "--channel",
             "CI",
         ]
-        cmd.extend(_model_argv(model))
+        if model:
+            cmd.extend(["--model", model])
         return cmd
 
     def parse_tui_event(self, raw: str) -> TuiParseResult:

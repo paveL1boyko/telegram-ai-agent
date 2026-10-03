@@ -12,7 +12,6 @@ from aiogram.types import (
 )
 
 from telegram_bot.core.messages import t
-from telegram_bot.core.services.model_autoselect import is_auto_model
 from telegram_bot.core.services.resume_listing import SessionEntry
 
 RESUME_PAGE_SIZE = 9
@@ -130,9 +129,7 @@ def model_keyboard(
     `openrouter/anthropic/claude-fable-5[1m]` overflow the 64-byte
     callback_data limit. The first row resets to the CLI default (whatever
     `~/.claude/settings.json` selects), which is the only way back to "no
-    override" once one is pinned. The second row joins the autoselect rotation:
-    the bot assigns a model the gateway currently serves, spreading topics
-    across distinct models instead of piling them onto one quota.
+    override" once one is pinned.
     """
 
     def _label(text: str, selected: bool) -> str:
@@ -143,12 +140,6 @@ def model_keyboard(
             InlineKeyboardButton(
                 text=_label(t("ui.model_default_label"), current_model is None),
                 callback_data="model:default",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_label(t("ui.model_auto_label"), is_auto_model(current_model)),
-                callback_data="model:auto",
             ),
         ],
     ]

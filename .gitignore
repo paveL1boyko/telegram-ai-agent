@@ -29,7 +29,6 @@ logs/
 # Runtime state
 session_mapping.json
 channel_sessions.json
-model_assign.json
 tmux_sessions/
 data/
 .codex/.sync/

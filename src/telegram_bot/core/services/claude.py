@@ -49,7 +49,6 @@ from telegram_bot.core.services.cc_modes import (
     _get_mode_prompt,
 )
 from telegram_bot.core.services.codex_mcp import build_codex_mcp_config_args
-from telegram_bot.core.services.model_autoselect import ModelAutoselect, is_auto_model
 from telegram_bot.core.services.providers import (
     CODEX_ADAPTER,
     ExecCommand,
@@ -148,11 +147,9 @@ class SessionManager:
         self,
         settings: Settings,
         topic_config: TopicConfig | None = None,
-        model_autoselect: ModelAutoselect | None = None,
     ) -> None:
         self._settings = settings
         self._topic_config = topic_config
-        self._model_autoselect = model_autoselect
         self._sessions: dict[ChannelKey, SessionData] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
         self._msg_sessions: collections.OrderedDict[int, object] = collections.OrderedDict()
@@ -233,24 +230,7 @@ class SessionManager:
         session.cwd = str(runtime.cwd)
         session.mcp_config = runtime.mcp_config or ""
         session.engine = choose_available_engine(runtime.engine) or runtime.engine
-        session.model = self.resolve_model(thread_id, runtime.model)
-
-    @property
-    def model_autoselect_enabled(self) -> bool:
-        """True when a topic can usefully be pinned to `auto`."""
-        return self._model_autoselect is not None and self._model_autoselect.enabled
-
-    def resolve_model(self, thread_id: int | None, model: str | None) -> str | None:
-        """Concrete model for a topic, expanding the `auto` sentinel.
-
-        Every session start reads the model from here, both the subprocess and
-        the tmux path (`start_session(model=session.model)`), so this is the one
-        place that needs to know autoselect exists. Without autoselect wired in,
-        `auto` degrades to "no override" rather than being passed to the CLI.
-        """
-        if self._model_autoselect is None:
-            return None if is_auto_model(model) else model
-        return self._model_autoselect.resolve(thread_id, model)
+        session.model = runtime.model
 
     def _get_session(self, channel_key: ChannelKey) -> SessionData:
         if channel_key not in self._sessions:

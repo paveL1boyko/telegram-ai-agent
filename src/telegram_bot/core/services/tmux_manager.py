@@ -2060,12 +2060,6 @@ class TmuxManager:
         async with self._get_channel_lock(channel_key):
             settings = topic_config.get_topic(channel_key[1])
             runtime = resolve_topic_runtime_config(settings, defaults)
-            # A topic pinned to `auto` must reach argv as a concrete id (or as
-            # nothing at all): the startup commands below are built from
-            # runtime.model, bypassing session.model.
-            resolve_model = getattr(session_manager, "resolve_model", None)
-            if resolve_model is not None:
-                runtime = replace(runtime, model=resolve_model(channel_key[1], runtime.model))
 
             if not self._validate_session_id_shape(target_session_id, target_provider):
                 return SwitchResult(kind="invalid_id")
