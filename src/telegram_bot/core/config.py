@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     model_presets: list[str] = [
         "anthropic/claude-opus-5[1m]",
         "anthropic/claude-fable-5[1m]",
+        "openrouter/moonshotai/kimi-k3[1m]",
+        "openrouter/openai/gpt-5.5[1m]",
+        "openrouter/x-ai/grok-4.6[1m]",
+        "selectel/z-ai/glm-5.3",
     ]
 
 
