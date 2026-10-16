@@ -52,6 +52,13 @@ from pathlib import Path
 from typing import Literal
 
 from telegram_bot.core.messages import t
+from telegram_bot.core.services.api_error_retry import (
+    NUDGE_DELAY_SEC as _API_ERROR_NUDGE_DELAY_SEC,
+)
+from telegram_bot.core.services.api_error_retry import (
+    ApiErrorRetryTracker,
+    is_retryable_api_error,
+)
 from telegram_bot.core.services.bot_mcp_runtime import ensure_bot_runtime_mcp_config
 from telegram_bot.core.services.claude import Mode, StreamEvent
 from telegram_bot.core.services.providers import (
@@ -224,11 +231,19 @@ class TmuxManager:
     def __init__(
         self,
         sessions_dir: Path,
+        *,
+        api_error_retry_limit: int = 4,
+        api_error_retry_prompt: str = "continue",
     ) -> None:
         self._sessions_dir = sessions_dir
         self._sessions: dict[ChannelKey, TmuxSessionState] = {}
         self._cancel_events: dict[ChannelKey, asyncio.Event] = {}
         self._is_processing: dict[ChannelKey, bool] = {}
+        # Auto-retry budget for transient CC API errors ("Invalid `signature`
+        # in `thinking` block" & co). The tracker counts consecutive nudges
+        # per channel; `_handle_api_error_event` performs the nudge itself.
+        self._api_error_retry = ApiErrorRetryTracker(api_error_retry_limit)
+        self._api_error_retry_prompt = api_error_retry_prompt
         # Shared spawn deadline per channel, populated by _spawn_tmux and
         # consumed by the next _tail_until_done to bound the transcript
         # poll-for-existence window inside the same 30s clock as readiness
@@ -1680,6 +1695,10 @@ class TmuxManager:
                 if not delivered:
                     # _safe_send_and_enter posted an alert; do not start tail.
                     return ""
+                # New user turn — fresh auto-retry budget for transient API
+                # errors, mirroring the manual "продолжай" the user could
+                # always type again on the next message.
+                self._api_error_retry.note_progress(channel_key)
 
                 adapter = get_adapter(state.provider)
                 if adapter.generates_own_session_id() and not state.transcript_path:
@@ -2489,7 +2508,7 @@ class TmuxManager:
             channel_key=channel_key,
             state=state,
             output_path=output_path,
-            on_event=on_event,
+            on_event=self._wrap_on_event_api_error_retry(channel_key, state, on_event),
             cancel_event=cancel_event,
             save_state=self._save_state,
             tmux_alive=self._tmux_alive,
@@ -2497,6 +2516,92 @@ class TmuxManager:
             idle_exit_sec=idle_exit_sec,
         )
         return await runner.run()
+
+    def _wrap_on_event_api_error_retry(
+        self,
+        channel_key: ChannelKey | None,
+        state: TmuxSessionState,
+        on_event: Callable[[StreamEvent], Awaitable[None] | None],
+    ) -> Callable[[StreamEvent], Awaitable[None]]:
+        """Intercept `api_error` StreamEvents on every tail path.
+
+        Applied inside `_tail_until_done`, so both `send_stream` turns and
+        recovery tails get the same behavior. Consumers downstream never see
+        the `api_error` event type — it is translated here into either a
+        retry nudge + status line, or the raw error text (pre-feature
+        rendering). Any other event counts as forward progress and resets the
+        channel's retry budget.
+        """
+
+        async def wrapped(event: StreamEvent) -> None:
+            if event.type == "api_error":
+                await self._handle_api_error_event(channel_key, state, event, on_event)
+                return
+            if channel_key is not None:
+                self._api_error_retry.note_progress(channel_key)
+            ret = on_event(event)
+            if asyncio.iscoroutine(ret):
+                await ret
+
+        return wrapped
+
+    async def _handle_api_error_event(
+        self,
+        channel_key: ChannelKey | None,
+        state: TmuxSessionState,
+        event: StreamEvent,
+        on_event: Callable[[StreamEvent], Awaitable[None] | None],
+    ) -> None:
+        """React to an `isApiErrorMessage` transcript entry.
+
+        Claude Code does not retry 400-class API errors itself — it prints
+        the error and idles at the prompt. For known-transient errors (see
+        `api_error_retry.RETRYABLE_API_ERROR_PATTERNS`) the session heals on
+        any follow-up message, so we nudge the pane with the configured
+        retry prompt, up to the consecutive-retry budget. Everything else —
+        non-retryable errors, exhausted budget, or a failed nudge delivery —
+        falls through to the pre-feature behavior of surfacing the raw error
+        text in chat.
+        """
+
+        async def dispatch(forwarded: StreamEvent) -> None:
+            ret = on_event(forwarded)
+            if asyncio.iscoroutine(ret):
+                await ret
+
+        attempt: int | None = None
+        if (
+            channel_key is not None
+            and state.provider == "claude"
+            and is_retryable_api_error(event.content)
+        ):
+            attempt = self._api_error_retry.register_error(channel_key)
+
+        if attempt is not None and channel_key is not None:
+            limit = self._api_error_retry.limit
+            logger.warning(
+                "TUI_IO: api_error autoretry session=%s attempt=%d/%d error=%r",
+                state.session_name,
+                attempt,
+                limit,
+                event.content[:200],
+            )
+            await dispatch(
+                StreamEvent("status", t("ui.api_error_retry", attempt=attempt, limit=limit))
+            )
+            # Let the TUI finish rendering the error and settle back at the
+            # input prompt before pasting the nudge.
+            await asyncio.sleep(_API_ERROR_NUDGE_DELAY_SEC)
+            async with self._get_channel_lock(channel_key):
+                delivered = await self._safe_send_and_enter(
+                    channel_key, state, self._api_error_retry_prompt
+                )
+            if delivered:
+                return
+            # The nudge did not land (a modal alert was already posted by the
+            # send helper) — fall through so the user still sees what failed.
+
+        await dispatch(StreamEvent("text", event.content))
 
     def _find_channel_key(self, state: TmuxSessionState) -> ChannelKey | None:
         """Reverse-lookup channel_key for a given state (cheap, dict is small)."""

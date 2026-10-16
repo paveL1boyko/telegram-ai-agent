@@ -53,6 +53,13 @@ class Settings(BaseSettings):
         "openrouter/x-ai/grok-4.6[1m]",
         "selectel/z-ai/glm-5.3",
     ]
+    # Auto-retry for transient Claude Code API errors. When CC writes an
+    # `isApiErrorMessage` transcript entry matching a known-transient pattern
+    # (e.g. "Invalid `signature` in `thinking` block"), the bot nudges the
+    # session with `api_error_retry_prompt` instead of just surfacing the raw
+    # error, up to `api_error_retry_limit` consecutive times. 0 disables.
+    api_error_retry_limit: int = 4
+    api_error_retry_prompt: str = "continue"
 
 
 @functools.lru_cache(maxsize=1)

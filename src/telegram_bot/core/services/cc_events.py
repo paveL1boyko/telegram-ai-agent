@@ -235,7 +235,7 @@ def _agent_done_status(description: str) -> str:
 class StreamEvent:
     """One event from CC stream."""
 
-    type: Literal["status", "text", "result", "result_message"]
+    type: Literal["status", "text", "result", "result_message", "api_error"]
     content: str
     session_id: str | None = None
 

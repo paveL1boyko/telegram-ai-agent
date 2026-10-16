@@ -103,6 +103,8 @@ async def _start() -> None:
     topic_config = TopicConfig(settings.topic_config_path)
     tmux_manager = TmuxManager(
         sessions_dir=Path(settings.project_root) / settings.tmux_sessions_dir,
+        api_error_retry_limit=settings.api_error_retry_limit,
+        api_error_retry_prompt=settings.api_error_retry_prompt,
     )
     tmux_manager.wire_live_buffer(bot=bot, topic_config=topic_config)
     tmux_manager.restore_all()

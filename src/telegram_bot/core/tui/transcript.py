@@ -37,7 +37,7 @@ FILTERED_TYPES = frozenset(
     }
 )
 
-ParsedKind = Literal["text", "tool_use", "tool_result", "thinking", "status", "skip"]
+ParsedKind = Literal["text", "tool_use", "tool_result", "thinking", "status", "api_error", "skip"]
 
 
 @dataclass(frozen=True)
@@ -94,6 +94,26 @@ def parse_jsonl_line(raw: str) -> ParsedEvent | None:
 
     if etype == "assistant":
         content = evt.get("message", {}).get("content", [])
+        if evt.get("isApiErrorMessage"):
+            # CC records a failed API request as an assistant entry flagged
+            # `isApiErrorMessage: true` whose text is the error ("API Error:
+            # 400 ... Invalid `signature` in `thinking` block"). Surface it
+            # as a dedicated kind so the tmux pipeline can auto-retry the
+            # transient ones instead of rendering them as model output.
+            if isinstance(content, str):
+                error_text = content
+            else:
+                error_text = next(
+                    (
+                        b.get("text", "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ),
+                    "",
+                )
+            if error_text:
+                return ParsedEvent(kind="api_error", payload={"text": error_text})
+            return ParsedEvent(kind="skip", payload={"reason": "api_error_empty"})
         # Assistant messages can mix blocks (e.g. `[thinking, text]` on Opus with
         # extended thinking). Scan all blocks and prefer real output — text then
         # tool_use — over thinking, otherwise the text gets silently dropped.
@@ -167,6 +187,9 @@ def parse_transcript_event(
         tool_input = parsed.payload.get("input")
         status = _tool_status(name, tool_input if isinstance(tool_input, dict) else None)
         return [StreamEvent("status", status)], session_id
+
+    if parsed.kind == "api_error":
+        return [StreamEvent("api_error", parsed.payload.get("text", ""))], session_id
 
     if parsed.kind == "status":
         text = parsed.payload.get("text", "")

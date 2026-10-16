@@ -194,6 +194,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ui.compacting": "⏳ Compacting context...",
         "ui.compact_done": "✅ Compacted: {pre:,} → {post:,} tokens",
+        "ui.api_error_retry": "⚠️ Transient API error, auto-retrying ({attempt}/{limit})...",
         "ui.running_command": "⚙️ Running {command}...",
         "ui.inactivity_kill": "Hung up, try again",
         "ui.voice_too_large": "Voice message is too large (max 100 MB).",
@@ -461,6 +462,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "и перезапусти бота."
         ),
         "ui.inactivity_kill": "Зависло, попробуй ещё раз",
+        "ui.api_error_retry": "⚠️ Временная ошибка API, авторетрай ({attempt}/{limit})...",
         "ui.voice_too_large": "Голосовое сообщение слишком большое (максимум 100 МБ).",
         "ui.voice_not_recognized": "Не удалось распознать голосовое сообщение",
         "ui.download_error": "Не удалось скачать файл, попробуй ещё раз",
