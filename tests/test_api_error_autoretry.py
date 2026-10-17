@@ -20,6 +20,7 @@ from telegram_bot.core.services import tmux_manager as tmux_manager_module
 from telegram_bot.core.services.api_error_retry import (
     ApiErrorRetryTracker,
     is_retryable_api_error,
+    nudge_delay_sec,
 )
 from telegram_bot.core.services.claude import StreamEvent
 from telegram_bot.core.services.tmux_manager import TmuxManager
@@ -107,10 +108,43 @@ def test_retry_tracker_budget_and_reset() -> None:
     assert disabled.register_error(key) is None
 
 
+def test_retry_tracker_incident_window_resets_budget() -> None:
+    """A quiet gap after exhaustion is a new incident — fresh budget.
+
+    Covers recovery the bot cannot observe: the user typing "продолжай"
+    directly into the tmux pane after the budget ran out. Without the
+    window the counter stayed exhausted forever and the next transient
+    error was never retried.
+    """
+    now = 1000.0
+    tracker = ApiErrorRetryTracker(limit=2, reset_after_sec=300.0, clock=lambda: now)
+    key = (1, 2)
+    assert tracker.register_error(key) == 1
+    now += 10
+    assert tracker.register_error(key) == 2
+    now += 10
+    assert tracker.register_error(key) is None  # exhausted
+    # Still inside the window — same incident, stays exhausted.
+    now += 299
+    assert tracker.register_error(key) is None
+    # Errors firing back-to-back keep the incident alive: the window is
+    # measured from the *last* error, not the first.
+    now += 299
+    assert tracker.register_error(key) is None
+    # Quiet gap longer than the window — new incident, fresh budget.
+    now += 301
+    assert tracker.register_error(key) == 1
+
+
+def test_nudge_delay_backoff_capped() -> None:
+    assert [nudge_delay_sec(n) for n in range(1, 8)] == [2.0, 4.0, 8.0, 16.0, 20.0, 20.0, 20.0]
+
+
 def test_settings_expose_api_error_retry_defaults() -> None:
     settings = Settings(_env_file=None, telegram_bot_token="test-token")
-    assert settings.api_error_retry_limit == 4
+    assert settings.api_error_retry_limit == 10
     assert settings.api_error_retry_prompt == "continue"
+    assert settings.api_error_retry_reset_sec == 300.0
 
 
 def _make_manager(tmp_path: Path, limit: int = 4) -> tuple[TmuxManager, TmuxSessionState]:
@@ -133,7 +167,7 @@ def _make_manager(tmp_path: Path, limit: int = 4) -> tuple[TmuxManager, TmuxSess
 
 
 def test_api_error_event_nudges_then_falls_back_to_raw_text(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tmux_manager_module, "_API_ERROR_NUDGE_DELAY_SEC", 0)
+    monkeypatch.setattr(tmux_manager_module, "_api_error_nudge_delay_sec", lambda attempt: 0)
     manager, state = _make_manager(tmp_path, limit=2)
     key = (1, 2)
 
@@ -165,7 +199,7 @@ def test_api_error_event_nudges_then_falls_back_to_raw_text(tmp_path: Path, monk
 
 
 def test_api_error_budget_resets_on_forward_progress(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tmux_manager_module, "_API_ERROR_NUDGE_DELAY_SEC", 0)
+    monkeypatch.setattr(tmux_manager_module, "_api_error_nudge_delay_sec", lambda attempt: 0)
     manager, state = _make_manager(tmp_path, limit=1)
     key = (1, 2)
 
@@ -211,7 +245,7 @@ def test_non_retryable_api_error_is_shown_without_nudge(tmp_path: Path, monkeypa
 
 
 def test_failed_nudge_delivery_still_surfaces_error(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tmux_manager_module, "_API_ERROR_NUDGE_DELAY_SEC", 0)
+    monkeypatch.setattr(tmux_manager_module, "_api_error_nudge_delay_sec", lambda attempt: 0)
     manager, state = _make_manager(tmp_path)
     key = (1, 2)
 

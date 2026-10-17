@@ -57,9 +57,15 @@ class Settings(BaseSettings):
     # `isApiErrorMessage` transcript entry matching a known-transient pattern
     # (e.g. "Invalid `signature` in `thinking` block"), the bot nudges the
     # session with `api_error_retry_prompt` instead of just surfacing the raw
-    # error, up to `api_error_retry_limit` consecutive times. 0 disables.
-    api_error_retry_limit: int = 4
+    # error, up to `api_error_retry_limit` consecutive times with exponential
+    # backoff (2s doubling, capped at 20s). 0 disables. The consecutive
+    # counter resets on forward progress, on a new user turn, and when a new
+    # error arrives more than `api_error_retry_reset_sec` after the previous
+    # one (new incident — covers manual recovery typed directly into the
+    # tmux pane, which the bot cannot observe).
+    api_error_retry_limit: int = 10
     api_error_retry_prompt: str = "continue"
+    api_error_retry_reset_sec: float = 300.0
 
 
 @functools.lru_cache(maxsize=1)

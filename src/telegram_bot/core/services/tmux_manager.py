@@ -53,11 +53,11 @@ from typing import Literal
 
 from telegram_bot.core.messages import t
 from telegram_bot.core.services.api_error_retry import (
-    NUDGE_DELAY_SEC as _API_ERROR_NUDGE_DELAY_SEC,
-)
-from telegram_bot.core.services.api_error_retry import (
     ApiErrorRetryTracker,
     is_retryable_api_error,
+)
+from telegram_bot.core.services.api_error_retry import (
+    nudge_delay_sec as _api_error_nudge_delay_sec,
 )
 from telegram_bot.core.services.bot_mcp_runtime import ensure_bot_runtime_mcp_config
 from telegram_bot.core.services.claude import Mode, StreamEvent
@@ -232,8 +232,9 @@ class TmuxManager:
         self,
         sessions_dir: Path,
         *,
-        api_error_retry_limit: int = 4,
+        api_error_retry_limit: int = 10,
         api_error_retry_prompt: str = "continue",
+        api_error_retry_reset_sec: float = 300.0,
     ) -> None:
         self._sessions_dir = sessions_dir
         self._sessions: dict[ChannelKey, TmuxSessionState] = {}
@@ -242,7 +243,9 @@ class TmuxManager:
         # Auto-retry budget for transient CC API errors ("Invalid `signature`
         # in `thinking` block" & co). The tracker counts consecutive nudges
         # per channel; `_handle_api_error_event` performs the nudge itself.
-        self._api_error_retry = ApiErrorRetryTracker(api_error_retry_limit)
+        self._api_error_retry = ApiErrorRetryTracker(
+            api_error_retry_limit, reset_after_sec=api_error_retry_reset_sec
+        )
         self._api_error_retry_prompt = api_error_retry_prompt
         # Shared spawn deadline per channel, populated by _spawn_tmux and
         # consumed by the next _tail_until_done to bound the transcript
@@ -2590,8 +2593,10 @@ class TmuxManager:
                 StreamEvent("status", t("ui.api_error_retry", attempt=attempt, limit=limit))
             )
             # Let the TUI finish rendering the error and settle back at the
-            # input prompt before pasting the nudge.
-            await asyncio.sleep(_API_ERROR_NUDGE_DELAY_SEC)
+            # input prompt before pasting the nudge; back off exponentially
+            # across attempts (2s → 4s → … → 20s cap) so upstream incidents
+            # that need tens of seconds to clear don't burn the whole budget.
+            await asyncio.sleep(_api_error_nudge_delay_sec(attempt))
             async with self._get_channel_lock(channel_key):
                 delivered = await self._safe_send_and_enter(
                     channel_key, state, self._api_error_retry_prompt
