@@ -27,7 +27,7 @@ _TOPIC_NAME_MAX = 128
 
 # Claude-family ids collapse to the family name in the topic title:
 # claude-fable-5 → fable, claude-opus-5-5 → opus. Other vendors keep their
-# full tail (kimi-k3, gpt-5.5) — there is no shorter canonical form.
+# full tail (kimi-k3, gpt-5.5) — the user prefers versions visible.
 _CLAUDE_FAMILY_RE = re.compile(r"(?i)^(opus|sonnet|haiku|fable)(?:-\d[\d.-]*)?$")
 
 # Trailing context-window flag — `anthropic/claude-fable-5[1m]` → `claude-fable-5`.

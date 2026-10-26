@@ -20,7 +20,10 @@ from telegram_bot.core.handlers.forward import router as forward_router
 from telegram_bot.core.handlers.mode import router as mode_router
 from telegram_bot.core.handlers.photo import cleanup_old_tmp_files, ensure_tmp_dir
 from telegram_bot.core.handlers.photo import router as photo_router
-from telegram_bot.core.handlers.streaming import send_streaming_response
+from telegram_bot.core.handlers.streaming import (
+    build_recovery_on_event_factory,
+    send_streaming_response,
+)
 from telegram_bot.core.handlers.tail import router as tail_router
 from telegram_bot.core.handlers.text import router as text_router
 from telegram_bot.core.handlers.voice import router as voice_router
@@ -119,6 +122,17 @@ async def _start() -> None:
     tmux_manager.restore_all()
     tmux_manager.start_modal_watchdog()
     session_manager = SessionManager(settings, topic_config=topic_config)
+    # Recovery tails deliver output typed straight into the tmux pane; the
+    # watchdog notices transcript growth and starts them (see tmux_manager).
+    tmux_manager.wire_recovery_events(
+        build_recovery_on_event_factory(
+            bot=bot,
+            topic_config=topic_config,
+            session_manager=session_manager,
+            tmux_manager=tmux_manager,
+        )
+    )
+    tmux_manager.start_activity_watchdog()
     transcriber = Transcriber(settings)
     forward_batcher = ForwardBatcher(bot=bot)
 

@@ -77,6 +77,20 @@ disable), `/cwd` changes and model/engine switches rename the forum topic to
 `manage_topics` admin right, failures are logged and swallowed. Assistant
 topics (no cwd concept) are never renamed.
 
+## Typing directly into the tmux pane
+
+A transcript tail only exists while a Telegram-originated turn runs. Output
+produced by typing straight into the tmux pane is picked up by the
+**activity watchdog** (`TmuxManager.start_activity_watchdog`, 10s tick):
+when a session's transcript grows beyond the delivered offset and no tail is
+running, it starts a recovery tail that streams the events live. Delivery
+goes through `build_recovery_on_event_factory`
+(`core/handlers/streaming.py`), wired at startup via
+`tmux_manager.wire_recovery_events(...)` — text/result events become regular
+messages, status follows the topic's stream_mode, message ids are recorded
+for reply-to-resume. `resume_tails` (tail-per-session at boot) is
+deliberately NOT revived; the watchdog starts tails on demand only.
+
 ## Texts
 
 Every user-visible string goes through `t("key")` in `core/messages.py`, and

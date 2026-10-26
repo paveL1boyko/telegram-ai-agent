@@ -6,10 +6,11 @@ import asyncio
 import contextlib
 import html
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from aiogram import Bot
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
@@ -38,6 +39,7 @@ __all__ = [
     "_balance_html_tags",
     "_markdown_to_html_parts",
     "_smart_escape",
+    "build_recovery_on_event_factory",
     "build_reply_context",
     "ensure_exec_mode_ready",
     "inject_reply_context",
@@ -773,3 +775,101 @@ async def send_streaming_response(
         return
 
     await _send_final_response(ctx, final_text)
+
+
+def build_recovery_on_event_factory(
+    *,
+    bot: Bot,
+    topic_config: TopicConfig,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+) -> Callable[[ChannelKey], Callable[[StreamEvent], Awaitable[None]]]:
+    """Factory for recovery-tail on_event handlers.
+
+    Delivers transcript events that were NOT caused by a Telegram message —
+    output the user produced by typing straight into the tmux pane, drained
+    by the activity watchdog's recovery tails. Without this, such output sat
+    unread until the next Telegram message, then flooded the topic as one
+    backlog dump (the 2026-10-26 "/compact replays everything" bug).
+
+    Delivery rules mirror send_streaming_response, minus the pieces that need
+    a user message (thinking placeholder, final-response keyboard):
+    text/result_message → formatted chunks; status → live buffer when one is
+    active, silent message in verbose mode, dropped in minimal mode.
+    """
+
+    def factory(channel_key: ChannelKey) -> Callable[[StreamEvent], Awaitable[None]]:
+        stream_mode = _resolve_stream_mode(topic_config, channel_key)
+        chat_id, thread_id = channel_key
+
+        async def on_event(event: StreamEvent) -> None:
+            # Same empty-content guard as the main streaming path — an empty
+            # chunk would make message.answer raise TelegramBadRequest.
+            if event.type in ("status", "text", "result_message") and not event.content.strip():
+                return
+
+            if event.type == "status":
+                if stream_mode == "live":
+                    raw = tmux_manager.get_buffer(channel_key)
+                    buf = raw if isinstance(raw, LiveStatusBuffer) else None
+                    if buf is not None:
+                        await buf.append(html.escape(event.content))
+                        return
+                if stream_mode != "verbose":
+                    return
+                safe_status = html.escape(event.content)
+                await send_html_with_fallback(
+                    send_html=lambda: bot.send_message(
+                        chat_id,
+                        safe_status,
+                        message_thread_id=thread_id,
+                        parse_mode=ParseMode.HTML,
+                        disable_notification=True,
+                    ),
+                    send_plain=lambda: bot.send_message(
+                        chat_id,
+                        event.content,
+                        message_thread_id=thread_id,
+                        disable_notification=True,
+                    ),
+                    label=f"recovery status {channel_key}",
+                )
+                return
+
+            if event.type not in ("text", "result_message"):
+                return
+
+            for chunk in split_html_message(event.content):
+
+                async def _send_html(c: str = chunk) -> Message:
+                    return await bot.send_message(
+                        chat_id, c, message_thread_id=thread_id, parse_mode=ParseMode.HTML
+                    )
+
+                async def _send_plain(c: str = chunk) -> Message:
+                    return await bot.send_message(chat_id, c, message_thread_id=thread_id)
+
+                outcome = await send_html_with_fallback(
+                    send_html=_send_html,
+                    send_plain=_send_plain,
+                    label=f"recovery {channel_key}",
+                )
+                if outcome.message_id is not None:
+                    # Bind to the live tmux session for reply-to-resume, same
+                    # as _record_tmux_message on the user-message path.
+                    snapshot = tmux_manager.get_session_snapshot(channel_key)
+                    if snapshot is not None:
+                        sid, provider, model = snapshot
+                        session_manager.record_message(
+                            outcome.message_id,
+                            sid,
+                            channel_key,
+                            provider=provider,
+                            model=model,
+                        )
+                if outcome.fatal:
+                    return
+
+        return on_event
+
+    return factory

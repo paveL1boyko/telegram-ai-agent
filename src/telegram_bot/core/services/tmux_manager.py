@@ -178,6 +178,12 @@ _ENTER_RETRY_LIMIT = 3
 # on the next tick.
 _PERMISSION_RESOLVE_WAIT_SEC = 0.7
 
+# How often the activity watchdog stats each session's transcript for growth
+# beyond the delivered offset. 10s keeps tmux-typed turns near-realtime in
+# Telegram while staying far below the cost of the modal watchdog's
+# capture-pane probe (a stat() per session per tick is effectively free).
+_ACTIVITY_WATCHDOG_INTERVAL_SEC = 10.0
+
 # Codex `_safe_send_codex` paste-retry budget. Three attempts x 1.5s poll
 # each — the upper bound when codex is mid-render and the bracketed-paste
 # chip needs an extra frame to land. Beyond this we surface a modal alert
@@ -296,6 +302,8 @@ class TmuxManager:
         self._recovery_on_event_factory: (
             Callable[[ChannelKey], Callable[[StreamEvent], Awaitable[None] | None]] | None
         ) = None
+        # Activity watchdog task — see start_activity_watchdog.
+        self._activity_watchdog_task: asyncio.Task[None] | None = None
         # Per-channel lock around send_direct's capture→send-keys→verify→Enter
         # sequence. Without it, two overlapping user messages race on shared
         # pane state.
@@ -372,6 +380,18 @@ class TmuxManager:
 
     def get_live_bot(self) -> object | None:
         return self._bot
+
+    def wire_recovery_events(
+        self,
+        factory: Callable[[ChannelKey], Callable[[StreamEvent], Awaitable[None] | None]],
+    ) -> None:
+        """Attach the Telegram-delivery factory used by recovery tails.
+
+        Separate from `resume_tails` (which also starts a permanent tail per
+        session) so the activity watchdog can deliver tmux-typed output
+        without reviving the tail-per-session-at-boot design.
+        """
+        self._recovery_on_event_factory = factory
 
     def get_topic_config(self) -> object | None:
         return self._topic_config
@@ -2424,6 +2444,54 @@ class TmuxManager:
         from telegram_bot.core.services.tmux_recovery import run_recovery_tail
 
         await run_recovery_tail(self, channel_key, state, output_path, on_event, cancel_event)
+
+    # --- Activity watchdog ---
+
+    def start_activity_watchdog(
+        self, interval_sec: float = _ACTIVITY_WATCHDOG_INTERVAL_SEC
+    ) -> None:
+        """Launch the background task that streams tmux-typed turns to Telegram.
+
+        Motivation (2026-10-26 bug): tails only exist while a Telegram-originated
+        turn is running. Output produced by typing straight into the tmux pane
+        accumulated unread, then flooded the topic as one backlog dump when the
+        next Telegram message started a tail. The watchdog stats each session's
+        transcript every `interval_sec`; growth beyond the delivered offset
+        with no tail running means someone is driving the pane directly, so a
+        recovery tail is started to drain it live. Idempotent.
+        """
+        if self._activity_watchdog_task is not None:
+            return
+        self._activity_watchdog_task = asyncio.create_task(
+            self._activity_watchdog_loop(interval_sec)
+        )
+
+    async def _activity_watchdog_loop(self, interval_sec: float) -> None:
+        while True:
+            await asyncio.sleep(interval_sec)
+            for key in list(self._sessions.keys()):
+                try:
+                    await self._check_channel_activity(key)
+                except Exception:
+                    logger.warning("activity watchdog tick failed for %s", key, exc_info=True)
+
+    async def _check_channel_activity(self, channel_key: ChannelKey) -> None:
+        """Start a recovery tail iff the transcript grew while no tail is running."""
+        if channel_key in self._cancel_events:
+            return  # a tail is already draining this channel
+        state = self._sessions.get(channel_key)
+        if state is None or not self._tmux_alive(state.session_name):
+            return
+        output_path = self._transcript_path_for_state(state)
+        if output_path is None:
+            return
+        try:
+            size = output_path.stat().st_size
+        except OSError:
+            return
+        if size <= state.offset:
+            return
+        await self._start_recovery_tail(channel_key, state, output_path, reason="activity")
 
     def _spawn_tmux_sync(
         self,
