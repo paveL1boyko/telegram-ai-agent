@@ -28,3 +28,10 @@ uv run ruff format --check .
 uv run mypy src/ mcp-servers/bot/server.py
 uv run pytest
 ```
+
+After committing final changes, restart the running bot so it picks up the
+new code: `make reload` (bot-only restart — agent `cc-*` tmux sessions keep
+running and are reattached on startup via `restore_all`). Note: the sandboxed
+shell cannot run `pgrep`, so `make reload` may report "failed to start" even
+when the bot started fine — verify with `tmux ls` and `tail .tg-bot.log`
+instead of rerunning it.
