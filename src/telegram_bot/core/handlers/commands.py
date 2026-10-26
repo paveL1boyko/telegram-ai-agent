@@ -11,7 +11,7 @@ import os
 import time
 from pathlib import Path
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -32,6 +32,7 @@ from telegram_bot.core.keyboards import (
     RESUME_PAGE_SIZE,
     _format_age,
     _format_size,
+    cwd_keyboard,
     engine_keyboard,
     exec_mode_keyboard,
     model_keyboard,
@@ -41,6 +42,11 @@ from telegram_bot.core.keyboards import (
 )
 from telegram_bot.core.messages import reset_lang_cache, t
 from telegram_bot.core.services.claude import SessionManager
+from telegram_bot.core.services.cwd_picker import (
+    CwdPickerState,
+    CwdPickerStore,
+    list_subdirs,
+)
 from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.picker_store import PickerState, PickerStore
 from telegram_bot.core.services.providers import engine_display_name, get_adapter
@@ -59,6 +65,7 @@ from telegram_bot.core.services.topic_config import (
     TopicConfig,
     normalize_model_override,
 )
+from telegram_bot.core.services.topic_naming import sync_topic_name
 from telegram_bot.core.services.topic_runtime import BotDefaults, resolve_topic_runtime_config
 from telegram_bot.core.types import ChannelKey, channel_key
 from telegram_bot.core.utils.telegram_html import split_html_message
@@ -664,15 +671,8 @@ async def on_stream_mode_click(
         await callback.answer(t("ui.stream_mode_write_failed"), show_alert=True)
         return
 
-    # Refresh both caption and keyboard so the visible current value matches the checkmark.
-    try:
-        await callback.message.edit_text(
-            t("ui.stream_mode_picker_caption", current=mode),
-            reply_markup=stream_mode_keyboard(mode),
-            parse_mode="HTML",
-        )
-    except Exception:
-        logger.debug("Failed to refresh stream_mode picker", exc_info=True)
+    # Picker self-destructs after a choice — like /model, no dead panels in history.
+    await _close_picker(callback)
     await callback.answer(t("ui.stream_mode_changed", mode=mode))
 
 
@@ -734,6 +734,7 @@ async def on_exec_mode_click(
     previous_mode = topic_config.get_topic(thread_id).exec_mode
 
     if new_mode == previous_mode:
+        await _close_picker(callback)
         await callback.answer(t("ui.exec_mode_already", mode=_exec_mode_label(new_mode)))
         return
 
@@ -763,15 +764,8 @@ async def on_exec_mode_click(
         new_mode,
     )
 
-    # Refresh both caption and keyboard so the visible current value matches the checkmark.
-    try:
-        await callback.message.edit_text(
-            _exec_mode_picker_caption(new_mode),
-            reply_markup=exec_mode_keyboard(new_mode),
-            parse_mode="HTML",
-        )
-    except Exception:
-        logger.debug("Failed to refresh exec_mode picker", exc_info=True)
+    # Picker self-destructs after a choice — like /model, no dead panels in history.
+    await _close_picker(callback)
     await callback.answer(t("ui.exec_mode_changed", mode=_exec_mode_label(new_mode)))
 
 
@@ -796,10 +790,13 @@ async def handle_engine_command(message: Message, topic_config: TopicConfig) -> 
 @router.callback_query(F.data.startswith("engine:"))
 async def on_engine_click(
     callback: CallbackQuery,
+    bot: Bot,
+    settings: Settings,
     topic_config: TopicConfig,
     tmux_manager: TmuxManager,
     message_queue: MessageQueue,
     session_manager: SessionManager,
+    bot_defaults: BotDefaults,
 ) -> None:
     """Apply provider engine changes for the picker topic."""
     if callback.data is None or callback.message is None:
@@ -827,6 +824,7 @@ async def on_engine_click(
     new_engine = raw_value
 
     if new_engine == current.engine:
+        await _close_picker(callback)
         await callback.answer(t("ui.engine_already"))
         return
 
@@ -839,6 +837,16 @@ async def on_engine_click(
         await tmux_manager.kill(key)
     await session_manager.clear_provider_session(key)
 
+    # Engine switch resets the model override — refresh the topic name suffix.
+    if settings.topic_autoname:
+        await sync_topic_name(
+            bot,
+            chat_id=key[0],
+            thread_id=thread_id,
+            topic_config=topic_config,
+            defaults=bot_defaults,
+        )
+
     logger.info(
         "engine switched: user_id=%s thread_id=%s previous=%s new=%s model=%s",
         callback.from_user.id if callback.from_user else None,
@@ -848,14 +856,7 @@ async def on_engine_click(
         current.model,
     )
     engine_name = engine_display_name(new_engine)
-    try:
-        await callback.message.edit_text(
-            t("ui.engine_picker_caption", engine=engine_name),
-            reply_markup=engine_keyboard(new_engine),
-            parse_mode="HTML",
-        )
-    except Exception:
-        logger.debug("Failed to refresh engine picker", exc_info=True)
+    await _close_picker(callback)
     await callback.answer(t("ui.engine_changed", engine=engine_name))
     await callback.message.answer(t("ui.engine_changed_new_session", engine=engine_name))
 
@@ -869,11 +870,14 @@ def _model_picker_caption(model: str | None) -> str:
     return t("ui.model_picker_caption", model=html.escape(_model_label(model)))
 
 
-async def _close_model_picker(callback: CallbackQuery) -> None:
+async def _close_picker(callback: CallbackQuery) -> None:
     """Delete the picker message once a choice has been made.
 
     Deletion can fail (message older than 48h, missing delete rights), so the
     fallback strips the keyboard instead, leaving a dead picker unclickable.
+    Shared by every settings picker (model/engine/uimode/stream) — the user
+    asked for pickers to self-destruct after a choice so they don't pile up
+    in the topic history.
     """
     message = callback.message
     if message is None or isinstance(message, InaccessibleMessage):
@@ -940,11 +944,13 @@ async def handle_model_button(
 @router.callback_query(F.data.startswith("model:"))
 async def on_model_click(
     callback: CallbackQuery,
+    bot: Bot,
     topic_config: TopicConfig,
     tmux_manager: TmuxManager,
     message_queue: MessageQueue,
     session_manager: SessionManager,
     settings: Settings,
+    bot_defaults: BotDefaults,
 ) -> None:
     """Pin (or clear) the model override for the picker topic."""
     if callback.data is None or callback.message is None:
@@ -982,7 +988,7 @@ async def on_model_click(
             return
 
     if new_model == current.model:
-        await _close_model_picker(callback)
+        await _close_picker(callback)
         await callback.answer(t("ui.model_already"))
         return
 
@@ -990,6 +996,15 @@ async def on_model_click(
     if not ok:
         await callback.answer(t("ui.model_write_failed"), show_alert=True)
         return
+
+    if settings.topic_autoname:
+        await sync_topic_name(
+            bot,
+            chat_id=key[0],
+            thread_id=thread_id,
+            topic_config=topic_config,
+            defaults=bot_defaults,
+        )
 
     label = _model_label(new_model)
 
@@ -1012,7 +1027,7 @@ async def on_model_click(
                     current.model,
                     new_model,
                 )
-                await _close_model_picker(callback)
+                await _close_picker(callback)
                 await callback.answer(t("ui.model_changed", model=label))
                 await callback.message.answer(t("ui.model_changed_live", model=label))
                 return
@@ -1025,7 +1040,7 @@ async def on_model_click(
                 current.engine,
                 new_model,
             )
-            await _close_model_picker(callback)
+            await _close_picker(callback)
             await callback.answer(t("ui.model_changed", model=label))
             await callback.message.answer(t("ui.model_live_failed", model=label))
             return
@@ -1046,7 +1061,7 @@ async def on_model_click(
         current.model,
         new_model,
     )
-    await _close_model_picker(callback)
+    await _close_picker(callback)
     await callback.answer(t("ui.model_changed", model=label))
     await callback.message.answer(t("ui.model_changed_new_session", model=label))
 
@@ -1107,3 +1122,487 @@ async def handle_sendfile_command(message: Message, command: CommandObject) -> N
     except Exception as exc:
         logger.warning("sendfile failed for %s", raw_path, exc_info=True)
         await message.answer(t("ui.sendfile_failed", error=str(exc)[:200]))
+
+
+async def _restart_session_for_new_cwd(
+    key: ChannelKey,
+    *,
+    exec_mode: str,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    forward_batcher: ForwardBatcher,
+) -> bool:
+    """Drop the old session and (tmux mode) immediately respawn in the new cwd.
+
+    A cwd change is only meaningful for a fresh session: a live TUI keeps
+    its spawn-time directory regardless of the config override (observed
+    2026-10-26: /cwd saved the override, then "New chat" respawned
+    clear_context with the stale state.cwd), so the override write and the
+    kill+respawn are one atomic operation. Returns False when the tmux
+    respawn failed — the override stays saved and the next message
+    lazy-starts the session.
+    """
+    if exec_mode == "tmux":
+        await tmux_manager.kill(key)
+        forward_batcher.clear(key)
+        await message_queue.clear(key)
+        await session_manager.kill_session(key)
+        # _get_session re-resolves topic_config on every lookup, so the
+        # session picks up the just-written cwd override here.
+        session = session_manager._get_session(key)
+        try:
+            await tmux_manager.start_session(
+                key,
+                mode=session.mode,
+                cwd=session.cwd,
+                mcp_config=session.mcp_config,
+                chat_id=session.chat_id,
+                session_manager=session_manager,
+                provider=session.engine,
+                model=session.model,
+            )
+        except RuntimeError:
+            logger.warning("tmux respawn after cwd change failed for %s", key, exc_info=True)
+            return False
+        return True
+    # Subprocess mode: nothing long-lived to restart, but the persisted
+    # subprocess session id belongs to the old cwd's transcript store —
+    # resuming it under the new cwd would fail, so drop it.
+    await session_manager.kill_session(key)
+    return True
+
+
+async def _apply_cwd_override(
+    *,
+    chat_id: int,
+    thread_id: int,
+    new_cwd: str | None,
+    bot: Bot,
+    settings: Settings,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    forward_batcher: ForwardBatcher,
+) -> str:
+    """Persist a cwd override (None = bot default), restart the session there.
+
+    Shared by `/cwd <path>`, `/cwd default` and the folder-picker callbacks
+    so all three behave identically: config write → session kill+respawn →
+    topic auto-rename. Returns the confirmation text (HTML).
+    """
+    ok = await topic_config.update_cwd(thread_id, new_cwd)
+    if not ok:
+        return t("ui.cwd_write_failed")
+
+    key = (chat_id, thread_id)
+    topic = topic_config.get_topic(thread_id)
+    runtime = resolve_topic_runtime_config(topic, bot_defaults)
+    restarted = await _restart_session_for_new_cwd(
+        key,
+        exec_mode=topic.exec_mode,
+        session_manager=session_manager,
+        tmux_manager=tmux_manager,
+        message_queue=message_queue,
+        forward_batcher=forward_batcher,
+    )
+    if settings.topic_autoname:
+        await sync_topic_name(
+            bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            topic_config=topic_config,
+            defaults=bot_defaults,
+        )
+    if not restarted:
+        return t("ui.reset_failed")
+    cwd = html.escape(str(runtime.cwd))
+    if topic.exec_mode == "tmux":
+        return t("ui.cwd_set_restarted", cwd=cwd)
+    return t("ui.cwd_set_next", cwd=cwd)
+
+
+def _cwd_picker_caption(cwd: Path, list_dir: Path, source: str) -> str:
+    return t(
+        "ui.cwd_picker_caption",
+        cwd=html.escape(str(cwd)),
+        source=source,
+        parent=html.escape(str(list_dir)),
+    )
+
+
+async def _stale_cwd_picker(callback: CallbackQuery) -> None:
+    if callback.message is not None and not isinstance(callback.message, InaccessibleMessage):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_reply_markup(reply_markup=None)
+    await _answer_callback_safely(callback, t("ui.cwd_picker_stale"), show_alert=True)
+
+
+def _cwd_callback_state(
+    callback: CallbackQuery, cwd_picker_store: CwdPickerStore, token: str
+) -> CwdPickerState | None:
+    """Resolve picker state and verify the callback fired in the same topic."""
+    state = cwd_picker_store.get(token)
+    if state is None or callback.message is None:
+        return None
+    if isinstance(callback.message, InaccessibleMessage):
+        return None
+    if (callback.message.chat.id, callback.message.message_thread_id) != (
+        state.chat_id,
+        state.thread_id,
+    ):
+        return None
+    return state
+
+
+@router.callback_query(F.data.startswith("cw:p:"))
+async def on_cwd_page(
+    callback: CallbackQuery,
+    cwd_picker_store: CwdPickerStore,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+) -> None:
+    """Flip the folder-picker page; only the keyboard changes."""
+    if callback.data is None or callback.message is None:
+        await callback.answer()
+        return
+    if isinstance(callback.message, InaccessibleMessage):
+        await callback.answer()
+        return
+    _, _, token, raw_page = callback.data.split(":")
+    state = _cwd_callback_state(callback, cwd_picker_store, token)
+    if state is None:
+        await _stale_cwd_picker(callback)
+        return
+    try:
+        page = int(raw_page)
+    except ValueError:
+        await _stale_cwd_picker(callback)
+        return
+    dirs = await asyncio.to_thread(list_subdirs, state.list_dir)
+    if not dirs:
+        await _stale_cwd_picker(callback)
+        return
+    runtime = resolve_topic_runtime_config(topic_config.get_topic(state.thread_id), bot_defaults)
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=cwd_keyboard(
+                dirs,
+                page=page,
+                list_dir=state.list_dir,
+                current_cwd=runtime.cwd,
+                token=token,
+            ),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cw:u:"))
+async def on_cwd_up(
+    callback: CallbackQuery,
+    cwd_picker_store: CwdPickerStore,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+) -> None:
+    """Re-list the picker one directory level up."""
+    if callback.data is None or callback.message is None:
+        await callback.answer()
+        return
+    if isinstance(callback.message, InaccessibleMessage):
+        await callback.answer()
+        return
+    _, _, token = callback.data.split(":")
+    state = _cwd_callback_state(callback, cwd_picker_store, token)
+    if state is None:
+        await _stale_cwd_picker(callback)
+        return
+    updated = cwd_picker_store.move_up(token)
+    if updated is None:
+        await _stale_cwd_picker(callback)
+        return
+    if updated.list_dir == state.list_dir:
+        await callback.answer()  # filesystem root — nowhere to go
+        return
+    dirs = await asyncio.to_thread(list_subdirs, updated.list_dir)
+    runtime = resolve_topic_runtime_config(topic_config.get_topic(state.thread_id), bot_defaults)
+    source = (
+        t("ui.cwd_source_override")
+        if topic_config.get_topic(state.thread_id).cwd
+        else t("ui.cwd_source_default")
+    )
+    try:
+        await callback.message.edit_text(
+            _cwd_picker_caption(runtime.cwd, updated.list_dir, source),
+            reply_markup=cwd_keyboard(
+                dirs,
+                page=0,
+                list_dir=updated.list_dir,
+                current_cwd=runtime.cwd,
+                token=token,
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer()
+
+
+async def _on_cwd_dir_chosen(
+    callback: CallbackQuery,
+    token: str,
+    path: Path,
+    *,
+    bot: Bot,
+    settings: Settings,
+    cwd_picker_store: CwdPickerStore,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    forward_batcher: ForwardBatcher,
+) -> None:
+    """Apply a picker-chosen directory exactly like `/cwd <path>`."""
+    state = _cwd_callback_state(callback, cwd_picker_store, token)
+    if state is None:
+        await _stale_cwd_picker(callback)
+        return
+    if not path.is_dir():
+        await _answer_callback_safely(callback, t("ui.cwd_not_found", path=str(path)))
+        return
+    cwd_picker_store.drop(token)
+    logger.info(
+        "cwd picked via keyboard: user_id=%s thread_id=%s cwd=%s",
+        callback.from_user.id if callback.from_user else None,
+        state.thread_id,
+        path,
+    )
+    text = await _apply_cwd_override(
+        chat_id=state.chat_id,
+        thread_id=state.thread_id,
+        new_cwd=str(path),
+        bot=bot,
+        settings=settings,
+        topic_config=topic_config,
+        bot_defaults=bot_defaults,
+        session_manager=session_manager,
+        tmux_manager=tmux_manager,
+        message_queue=message_queue,
+        forward_batcher=forward_batcher,
+    )
+    await _close_picker(callback)
+    await callback.answer()
+    if callback.message is not None and not isinstance(callback.message, InaccessibleMessage):
+        await callback.message.answer(text, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("cw:s:"))
+async def on_cwd_pick(
+    callback: CallbackQuery,
+    bot: Bot,
+    settings: Settings,
+    cwd_picker_store: CwdPickerStore,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    forward_batcher: ForwardBatcher,
+) -> None:
+    """Apply one of the listed subdirectories as the new topic cwd."""
+    if callback.data is None:
+        await callback.answer()
+        return
+    _, _, token, raw_idx = callback.data.split(":")
+    state = _cwd_callback_state(callback, cwd_picker_store, token)
+    if state is None:
+        await _stale_cwd_picker(callback)
+        return
+    try:
+        idx = int(raw_idx)
+    except ValueError:
+        await _stale_cwd_picker(callback)
+        return
+    dirs = await asyncio.to_thread(list_subdirs, state.list_dir)
+    if idx < 0 or idx >= len(dirs):
+        await _stale_cwd_picker(callback)
+        return
+    await _on_cwd_dir_chosen(
+        callback,
+        token,
+        dirs[idx],
+        bot=bot,
+        settings=settings,
+        cwd_picker_store=cwd_picker_store,
+        topic_config=topic_config,
+        bot_defaults=bot_defaults,
+        session_manager=session_manager,
+        tmux_manager=tmux_manager,
+        message_queue=message_queue,
+        forward_batcher=forward_batcher,
+    )
+
+
+@router.callback_query(F.data.startswith("cw:ok:"))
+async def on_cwd_select_listed(
+    callback: CallbackQuery,
+    bot: Bot,
+    settings: Settings,
+    cwd_picker_store: CwdPickerStore,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    forward_batcher: ForwardBatcher,
+) -> None:
+    """Select the directory the picker is currently listing as the new cwd."""
+    if callback.data is None:
+        await callback.answer()
+        return
+    _, _, token = callback.data.split(":")
+    state = _cwd_callback_state(callback, cwd_picker_store, token)
+    if state is None:
+        await _stale_cwd_picker(callback)
+        return
+    await _on_cwd_dir_chosen(
+        callback,
+        token,
+        state.list_dir,
+        bot=bot,
+        settings=settings,
+        cwd_picker_store=cwd_picker_store,
+        topic_config=topic_config,
+        bot_defaults=bot_defaults,
+        session_manager=session_manager,
+        tmux_manager=tmux_manager,
+        message_queue=message_queue,
+        forward_batcher=forward_batcher,
+    )
+
+
+@router.callback_query(F.data.startswith("cw:x:"))
+async def on_cwd_cancel(callback: CallbackQuery, cwd_picker_store: CwdPickerStore) -> None:
+    if callback.data is not None:
+        cwd_picker_store.drop(callback.data.rsplit(":", 1)[-1])
+    await _close_picker(callback)
+    await _answer_callback_safely(callback, t("ui.cwd_picker_cancelled"))
+
+
+@router.message(Command("cwd", "set_pwd"))
+async def handle_cwd_command(
+    message: Message,
+    command: CommandObject,
+    bot: Bot,
+    settings: Settings,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    session_manager: SessionManager,
+    tmux_manager: TmuxManager,
+    message_queue: MessageQueue,
+    forward_batcher: ForwardBatcher,
+    cwd_picker_store: CwdPickerStore,
+) -> None:
+    """Show, browse, or change the working directory of the current forum topic.
+
+    Bare `/cwd` posts a folder picker: subdirectories of the effective
+    cwd's parent, one tap per project, with pagination and a "⬆ .." button
+    to climb the tree. `/cwd <absolute path>` sets any directory directly,
+    `/cwd default` clears the override. Every change kills the live session
+    and respawns it in the new directory — the override never lags behind
+    the running TUI.
+    """
+    _, thread_id = channel_key(message)
+    if thread_id is None:
+        await message.answer(t("ui.cwd_not_in_forum"))
+        return
+
+    topic = topic_config.get_topic(thread_id)
+    runtime = resolve_topic_runtime_config(topic, bot_defaults)
+    source = t("ui.cwd_source_override") if topic.cwd else t("ui.cwd_source_default")
+    arg = (command.args or "").strip()
+
+    if not arg:
+        parent = runtime.cwd.parent
+        dirs = await asyncio.to_thread(list_subdirs, parent)
+        if not dirs:
+            await message.answer(
+                t("ui.cwd_current", cwd=html.escape(str(runtime.cwd)), source=source)
+                + "\n"
+                + t("ui.cwd_picker_empty", parent=html.escape(str(parent))),
+                parse_mode="HTML",
+            )
+            return
+        token = cwd_picker_store.put(
+            CwdPickerState(
+                chat_id=message.chat.id,
+                thread_id=thread_id,
+                list_dir=parent,
+                created_at=time.time(),
+            )
+        )
+        await message.answer(
+            _cwd_picker_caption(runtime.cwd, parent, source),
+            reply_markup=cwd_keyboard(
+                dirs,
+                page=0,
+                list_dir=parent,
+                current_cwd=runtime.cwd,
+                token=token,
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    if arg.lower() == "default":
+        logger.info("cwd override cleared: thread_id=%s", thread_id)
+        text = await _apply_cwd_override(
+            chat_id=message.chat.id,
+            thread_id=thread_id,
+            new_cwd=None,
+            bot=bot,
+            settings=settings,
+            topic_config=topic_config,
+            bot_defaults=bot_defaults,
+            session_manager=session_manager,
+            tmux_manager=tmux_manager,
+            message_queue=message_queue,
+            forward_batcher=forward_batcher,
+        )
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    path = Path(arg).expanduser()
+    if not path.is_absolute():
+        await message.answer(t("ui.cwd_not_absolute"))
+        return
+    if not path.is_dir():
+        await message.answer(t("ui.cwd_not_found", path=html.escape(arg)))
+        return
+
+    logger.info(
+        "cwd override set: user_id=%s thread_id=%s cwd=%s",
+        message.from_user and message.from_user.id,
+        thread_id,
+        path,
+    )
+    text = await _apply_cwd_override(
+        chat_id=message.chat.id,
+        thread_id=thread_id,
+        new_cwd=str(path),
+        bot=bot,
+        settings=settings,
+        topic_config=topic_config,
+        bot_defaults=bot_defaults,
+        session_manager=session_manager,
+        tmux_manager=tmux_manager,
+        message_queue=message_queue,
+        forward_batcher=forward_batcher,
+    )
+    await message.answer(text, parse_mode="HTML")

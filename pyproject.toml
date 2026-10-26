@@ -46,6 +46,8 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 # These files intentionally match Claude/Codex TUI glyphs rendered by the CLI.
 "src/telegram_bot/core/tui/capture.py" = ["RUF001", "RUF003"]
 "src/telegram_bot/core/tui/modal_detect.py" = ["RUF001", "RUF002", "RUF003"]
+"src/telegram_bot/core/tui/permission_prompt.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_permission_autoapprove.py" = ["RUF001", "RUF003"]
 
 [tool.mypy]
 python_version = "3.12"

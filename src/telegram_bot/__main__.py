@@ -29,6 +29,7 @@ from telegram_bot.core.messages import t
 from telegram_bot.core.middleware.auth import AuthMiddleware
 from telegram_bot.core.services.bot_commands import setup_bot_commands
 from telegram_bot.core.services.claude import SessionManager
+from telegram_bot.core.services.cwd_picker import CwdPickerStore
 from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.picker_store import PickerStore
 from telegram_bot.core.services.tmux_manager import TmuxManager
@@ -49,6 +50,7 @@ async def process_queue_item(
     bot: Bot,
     session_manager: SessionManager,
     tmux_manager: TmuxManager,
+    topic_config: TopicConfig,
 ) -> None:
     """Send a queued prompt to CC; on session change, notify the user."""
     old_session_id = session_manager.get_current_session_id(channel_key)
@@ -82,7 +84,12 @@ async def process_queue_item(
     if reply_message is None:
         return
     await send_streaming_response(
-        reply_message, session_manager, channel_key, prompt, tmux_manager=tmux_manager
+        reply_message,
+        session_manager,
+        channel_key,
+        prompt,
+        tmux_manager=tmux_manager,
+        topic_config=topic_config,
     )
 
 
@@ -106,6 +113,7 @@ async def _start() -> None:
         api_error_retry_limit=settings.api_error_retry_limit,
         api_error_retry_prompt=settings.api_error_retry_prompt,
         api_error_retry_reset_sec=settings.api_error_retry_reset_sec,
+        auto_approve_permission_tools=settings.auto_approve_permission_tools,
     )
     tmux_manager.wire_live_buffer(bot=bot, topic_config=topic_config)
     tmux_manager.restore_all()
@@ -128,6 +136,7 @@ async def _start() -> None:
             bot=bot,
             session_manager=session_manager,
             tmux_manager=tmux_manager,
+            topic_config=topic_config,
         )
 
     message_queue = MessageQueue(bot, session_manager, _process_queue_item)
@@ -165,6 +174,7 @@ async def _start() -> None:
     dp["topic_config"] = topic_config
     dp["tmux_manager"] = tmux_manager
     dp["picker_store"] = PickerStore()
+    dp["cwd_picker_store"] = CwdPickerStore()
     dp["bot_defaults"] = BotDefaults(
         cwd=default_cwd,
         mcp_config=Path(settings.project_root) / ".mcp.bot.json",

@@ -42,16 +42,40 @@ The established pattern (see `/model`, `/engine`, `/uimode` in
    `message_queue.is_busy(key)` before mutating session state.
 4. Persist through `topic_config.update_*`, then answer the callback and post
    a confirmation message.
-5. Picker lifecycle: settings pickers (`/engine`, `/uimode`, stream/exec mode)
-   re-render in place so the checkmark tracks the saved value; the model
-   picker instead deletes itself after a successful choice
-   (`_close_model_picker` — delete, fall back to stripping the keyboard when
-   deletion fails, e.g. the message is older than 48h). Pick one behavior
-   deliberately.
+5. Picker lifecycle: every settings picker (`/model`, `/engine`, `/uimode`,
+   `/stream`) deletes itself after a successful choice via `_close_picker`
+   (delete, fall back to stripping the keyboard when deletion fails, e.g.
+   the message is older than 48h). Dead pickers must not pile up in the
+   topic history — keep this behavior for new pickers.
 
 New handler dependencies (services) are injected by name: add the instance to
 `dp["<name>"]` in `__main__.py` and declare a parameter with the same name in
 the handler signature.
+
+## `/cwd`, the folder picker, and topic auto-naming
+
+`/cwd <absolute path>` (and `/cwd default`) is one atomic operation in
+`_apply_cwd_override`: persist the override via `topic_config.update_cwd`,
+then kill the live session and respawn it in the new directory (tmux mode),
+or drop the stale subprocess session id (subprocess mode). A live TUI keeps
+its spawn-time directory regardless of config, so never persist a cwd change
+without the restart — that was the 2026-10-26 bug where "New chat" came back
+up in the old directory.
+
+Bare `/cwd` posts a folder picker: subdirectories of the effective cwd's
+parent (`services/cwd_picker.py` lists them, `cwd_keyboard` renders pages of
+8, `⬆ ..` climbs a level, `✅ <dirname>` selects the listed directory).
+Picker state lives in `CwdPickerStore` (token in callback_data, TTL 15 min),
+mirroring `PickerStore` for `/resume`.
+
+When `Settings.topic_autoname` is on (default; `TOPIC_AUTONAME=false` to
+disable), `/cwd` changes and model/engine switches rename the forum topic to
+`<cwd folder> · <short model>` via `sync_topic_name`
+(`services/topic_naming.py`). Short model names collapse the Claude family
+(`anthropic/claude-fable-5[1m]` → `fable`) and keep other vendors' tails
+(`kimi-k3`, `gpt-5.5`). Renames are best-effort — the bot needs the
+`manage_topics` admin right, failures are logged and swallowed. Assistant
+topics (no cwd concept) are never renamed.
 
 ## Texts
 

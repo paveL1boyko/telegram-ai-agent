@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -16,6 +17,7 @@ from telegram_bot.core.services.resume_listing import SessionEntry
 
 RESUME_PAGE_SIZE = 9
 _RESUME_BUTTONS_PER_ROW = 3
+CWD_PAGE_SIZE = 8
 
 
 def topic_keyboard() -> ReplyKeyboardMarkup:
@@ -197,6 +199,66 @@ def resume_keyboard(
         ]
     )
     rows.append([InlineKeyboardButton(text="✕", callback_data=f"rs:cancel:{token}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cwd_keyboard(
+    dirs: Sequence[Path],
+    *,
+    page: int,
+    list_dir: Path,
+    current_cwd: Path | None,
+    token: str,
+) -> InlineKeyboardMarkup:
+    """Inline picker for /cwd: subdirectories of `list_dir`, one per row.
+
+    Buttons carry the picker token and a global index into the sorted dir
+    list — paths themselves would overflow the 64-byte callback_data limit.
+    The currently effective cwd is marked ✅; "✅ <dirname>" selects the
+    listed directory itself, "⬆ .." re-lists its parent.
+    """
+    total_pages = max(1, (len(dirs) + CWD_PAGE_SIZE - 1) // CWD_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * CWD_PAGE_SIZE
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx in range(start, min(start + CWD_PAGE_SIZE, len(dirs))):
+        path = dirs[idx]
+        marker = "✅ " if current_cwd is not None and path == current_cwd else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{marker}📁 {path.name}",
+                    callback_data=f"cw:s:{token}:{idx}",
+                ),
+            ],
+        )
+
+    if total_pages > 1:
+        rows.append(
+            [
+                InlineKeyboardButton(text="◀", callback_data=f"cw:p:{token}:{max(page - 1, 0)}"),
+                InlineKeyboardButton(
+                    text=f"{page + 1}/{total_pages}",
+                    callback_data=f"cw:p:{token}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="▶",
+                    callback_data=f"cw:p:{token}:{min(page + 1, total_pages - 1)}",
+                ),
+            ],
+        )
+
+    select_label = list_dir.name or str(list_dir)
+    nav_row = [
+        InlineKeyboardButton(
+            text=f"✅ {select_label[:32]}",
+            callback_data=f"cw:ok:{token}",
+        ),
+    ]
+    if list_dir.parent != list_dir:
+        nav_row.insert(0, InlineKeyboardButton(text="⬆ ..", callback_data=f"cw:u:{token}"))
+    rows.append(nav_row)
+    rows.append([InlineKeyboardButton(text="✕", callback_data=f"cw:x:{token}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramAPIError
 
+from telegram_bot.core.messages import t
 from telegram_bot.core.services.providers import get_adapter
 from telegram_bot.core.tui.modal_alert import render_modal_alert, render_modal_idle_alert
 from telegram_bot.core.types import ChannelKey
@@ -59,6 +60,7 @@ AUDIT_SOURCE_SEND_FAILED = "modal_alert_send_failed"
 AUDIT_SOURCE_IDLE_WATCHDOG = "modal_alert_idle_watchdog"
 AUDIT_SOURCE_USER_COMMAND = "user_command"
 AUDIT_SOURCE_TUI_BUTTON = "tui_button"
+AUDIT_SOURCE_PERMISSION_AUTO_APPROVE = "permission_auto_approve"
 
 
 def _safe_exc_message(exc: BaseException) -> str:
@@ -229,6 +231,53 @@ async def send_modal_alert(
             type(exc).__name__,
             _safe_exc_message(exc),
             len(text),
+        )
+
+
+async def send_permission_autoapprove_notice(
+    manager: TmuxManager,
+    channel_key: ChannelKey,
+    session_name: str,
+    tool: str,
+    pane: str,
+) -> None:
+    """Post the short "permission auto-approved" notice to Telegram.
+
+    Fires once per auto-approved dialog (the watchdog dedups via
+    `_last_modal_pane`), so the chat keeps a visible audit trail of every
+    approval the bot made on the operator's behalf. No keyboard — this is
+    informational, not actionable.
+    """
+    bot = manager._bot
+    if bot is None:
+        return
+    try:
+        sent = await bot.send_message(  # type: ignore[attr-defined]
+            chat_id=channel_key[0],
+            text=t("ui.permission_auto_approved", tool=tool),
+            message_thread_id=channel_key[1],
+        )
+        message_id: int | str = getattr(sent, "message_id", "?")
+        logger.info(
+            "TUI_IO: permission auto-approved session=%s tool=%s channel=%s message_id=%s",
+            session_name,
+            tool,
+            channel_key,
+            message_id,
+        )
+        log_alert_audit(
+            source=AUDIT_SOURCE_PERMISSION_AUTO_APPROVE,
+            reason=f"tool={tool}",
+            session_name=session_name,
+            message_id=message_id,
+            pane=pane,
+        )
+    except (TimeoutError, TelegramAPIError, OSError) as exc:
+        logger.warning(
+            "TUI_IO: permission auto-approve notice failed session=%s exc=%s reason=%r",
+            session_name,
+            type(exc).__name__,
+            _safe_exc_message(exc),
         )
 
 

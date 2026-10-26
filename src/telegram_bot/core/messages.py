@@ -163,6 +163,33 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.stream_mode_invalid": "Unknown mode",
         "ui.stream_mode_not_in_forum": "⚠️ /stream works only in forum topics.",
         "ui.stream_mode_write_failed": "Failed to save config",
+        "ui.cwd_not_in_forum": "⚠️ /cwd works only in forum topics.",
+        "ui.cwd_current": "Working directory: <code>{cwd}</code> ({source})",
+        "ui.cwd_source_override": "topic override",
+        "ui.cwd_source_default": "bot default",
+        "ui.cwd_set_restarted": (
+            "📂 Working directory: <code>{cwd}</code>\n\n"
+            "Live session restarted in the new directory."
+        ),
+        "ui.cwd_set_next": (
+            "📂 Working directory: <code>{cwd}</code>\n\nApplies from the next message."
+        ),
+        "ui.cwd_picker_caption": (
+            "Working directory: <code>{cwd}</code> ({source})\n\n"
+            "Pick a folder inside <code>{parent}</code>,"
+            " or send /cwd &lt;absolute path&gt; for any directory:"
+        ),
+        "ui.cwd_picker_empty": (
+            "No subdirectories in <code>{parent}</code>"
+            " — send /cwd &lt;absolute path&gt; to set any directory."
+        ),
+        "ui.cwd_picker_stale": "List is stale, open /cwd again",
+        "ui.cwd_picker_cancelled": "Cancelled",
+        "ui.cwd_not_absolute": (
+            "⚠️ Use an absolute path (starting with /), or 'default' to clear the override."
+        ),
+        "ui.cwd_not_found": "⚠️ Directory does not exist: {path}",
+        "ui.cwd_write_failed": "Failed to save config",
         "ui.session_switched": "🔄 session: {sid}",
         "ui.session_switched_engine": "🔄 {engine} session: {sid}",
         "ui.resume_picker_caption_hdr": "Sessions for <code>{cwd}</code>, page {page}/{total}",
@@ -195,6 +222,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.compacting": "⏳ Compacting context...",
         "ui.compact_done": "✅ Compacted: {pre:,} → {post:,} tokens",
         "ui.api_error_retry": "⚠️ Transient API error, auto-retrying ({attempt}/{limit})...",
+        "ui.permission_auto_approved": "⚡ Auto-approved permission: {tool}",
         "ui.running_command": "⚙️ Running {command}...",
         "ui.inactivity_kill": "Hung up, try again",
         "ui.voice_too_large": "Voice message is too large (max 100 MB).",
@@ -428,6 +456,32 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.stream_mode_invalid": "Неизвестный режим",
         "ui.stream_mode_not_in_forum": "⚠️ /stream работает только внутри форум-топиков.",
         "ui.stream_mode_write_failed": "Не удалось записать конфиг",
+        "ui.cwd_not_in_forum": "⚠️ /cwd работает только внутри форум-топиков.",
+        "ui.cwd_current": "Рабочая директория: <code>{cwd}</code> ({source})",
+        "ui.cwd_source_override": "переопределено для топика",
+        "ui.cwd_source_default": "дефолт бота",
+        "ui.cwd_set_restarted": (
+            "📂 Рабочая директория: <code>{cwd}</code>\n\nСессия перезапущена в новой директории."
+        ),
+        "ui.cwd_set_next": (
+            "📂 Рабочая директория: <code>{cwd}</code>\n\nПрименится со следующего сообщения."
+        ),
+        "ui.cwd_picker_caption": (
+            "Рабочая директория: <code>{cwd}</code> ({source})\n\n"
+            "Выбери папку внутри <code>{parent}</code>,"
+            " или отправь /cwd &lt;абсолютный путь&gt; для любой директории:"
+        ),
+        "ui.cwd_picker_empty": (
+            "В <code>{parent}</code> нет подпапок"
+            " — отправь /cwd &lt;абсолютный путь&gt;, чтобы задать любую директорию."
+        ),
+        "ui.cwd_picker_stale": "Список устарел, открой /cwd заново",
+        "ui.cwd_picker_cancelled": "Отменено",
+        "ui.cwd_not_absolute": (
+            "⚠️ Нужен абсолютный путь (начинается с /) или 'default', чтобы снять переопределение."
+        ),
+        "ui.cwd_not_found": "⚠️ Директория не существует: {path}",
+        "ui.cwd_write_failed": "Не удалось записать конфиг",
         "ui.session_switched": "🔄 сессия: {sid}",
         "ui.session_switched_engine": "🔄 сессия {engine}: {sid}",
         "ui.resume_picker_caption_hdr": "Сессии для <code>{cwd}</code>, страница {page}/{total}",
@@ -463,6 +517,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ui.inactivity_kill": "Зависло, попробуй ещё раз",
         "ui.api_error_retry": "⚠️ Временная ошибка API, авторетрай ({attempt}/{limit})...",
+        "ui.permission_auto_approved": "⚡ Авто-подтверждено разрешение: {tool}",
         "ui.voice_too_large": "Голосовое сообщение слишком большое (максимум 100 МБ).",
         "ui.voice_not_recognized": "Не удалось распознать голосовое сообщение",
         "ui.download_error": "Не удалось скачать файл, попробуй ещё раз",

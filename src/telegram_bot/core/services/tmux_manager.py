@@ -46,7 +46,7 @@ import logging
 import re
 import subprocess
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -77,6 +77,9 @@ from telegram_bot.core.services.tmux_modal_watchdog import (
 )
 from telegram_bot.core.services.tmux_modal_watchdog import (
     send_modal_idle_alert as _send_modal_idle_alert_impl,
+)
+from telegram_bot.core.services.tmux_modal_watchdog import (
+    send_permission_autoapprove_notice as _send_permission_notice_impl,
 )
 from telegram_bot.core.services.tmux_recovery import (
     build_resume_startup_cmd,
@@ -138,6 +141,10 @@ from telegram_bot.core.tui.modal_detect import (
     nessy_input_bar_content,
 )
 from telegram_bot.core.tui.paths import generate_session_uuid, transcript_path
+from telegram_bot.core.tui.permission_prompt import (
+    normalize_tool_name,
+    parse_permission_prompt,
+)
 from telegram_bot.core.tui.send_keys import (
     PASTE_MODE_CHAR_THRESHOLD,
     send_ctrl_u,
@@ -162,6 +169,14 @@ _MODAL_DIAG_PANE_TAIL_LINES = 30
 _POLL_STEP_SEC = 0.05  # fine-grained poll interval inside send_direct's pane-verify loop
 _ENTER_RETRY_SETTLE_SEC = 0.5
 _ENTER_RETRY_LIMIT = 3
+
+# Settle pause between pressing Enter on a verified tool-permission dialog
+# and the re-capture that confirms the dialog actually dismissed
+# (`_auto_approve_permission`). CC needs a frame to resolve the approval
+# and redraw; 0.7s is comfortably above a render tick and below the modal
+# watchdog interval, so a failed dismissal still surfaces as an idle alert
+# on the next tick.
+_PERMISSION_RESOLVE_WAIT_SEC = 0.7
 
 # Codex `_safe_send_codex` paste-retry budget. Three attempts x 1.5s poll
 # each — the upper bound when codex is mid-render and the bracketed-paste
@@ -235,6 +250,7 @@ class TmuxManager:
         api_error_retry_limit: int = 10,
         api_error_retry_prompt: str = "continue",
         api_error_retry_reset_sec: float = 300.0,
+        auto_approve_permission_tools: Iterable[str] | None = None,
     ) -> None:
         self._sessions_dir = sessions_dir
         self._sessions: dict[ChannelKey, TmuxSessionState] = {}
@@ -247,6 +263,13 @@ class TmuxManager:
             api_error_retry_limit, reset_after_sec=api_error_retry_reset_sec
         )
         self._api_error_retry_prompt = api_error_retry_prompt
+        # Operator pre-authorization for CC tool-permission dialogs (see
+        # tui/permission_prompt.py). Normalized names ("websearch"); the
+        # modal watchdog answers "1. Yes" only when the dialog verifies
+        # structurally AND the tool is in this set. Empty = disabled.
+        self._auto_approve_tools = {
+            normalize_tool_name(name) for name in (auto_approve_permission_tools or ())
+        }
         # Shared spawn deadline per channel, populated by _spawn_tmux and
         # consumed by the next _tail_until_done to bound the transcript
         # poll-for-existence window inside the same 30s clock as readiness
@@ -324,6 +347,16 @@ class TmuxManager:
 
     def pop_tui_panel(self, key: ChannelKey) -> int | None:
         return self._tui_panel_messages.pop(key, None)
+
+    def reset_modal_dedup(self, key: ChannelKey) -> None:
+        """Clear the watchdog's modal-pane dedup for a channel.
+
+        Used when a modal-alert message is deleted after a choice-button
+        press: if the keypress did NOT actually dismiss the modal (wrong
+        digit for the menu), the watchdog must re-alert on its next tick
+        instead of staying silenced by the stale dedup entry.
+        """
+        self._last_modal_pane.pop(key, None)
 
     def wire_live_buffer(self, *, bot: object, topic_config: object) -> None:
         """Attach the services needed to materialize LiveStatusBuffers.
@@ -1620,7 +1653,12 @@ class TmuxManager:
         is in flight, capture the pane, de-dup against the last alerted
         snapshot, detect, and post an idle-alert on a hit. If the pane no
         longer shows a modal, clear the dedup entry so a future modal
-        (even with an identical pane hash by coincidence) will fire again."""
+        (even with an identical pane hash by coincidence) will fire again.
+
+        Tool-permission dialogs for operator-allowlisted tools (e.g.
+        WebSearch under a managed CC build — see tui/permission_prompt.py)
+        are answered with "1. Yes" instead of alerting; only a failed or
+        ambiguous approval falls through to the manual alert."""
         lock = self._channel_locks.get(channel_key)
         if lock is not None and lock.locked():
             return
@@ -1635,12 +1673,84 @@ class TmuxManager:
             if state.provider == "codex"
             else is_modal_present(pane)
         )
+        tool = self._auto_approvable_tool(state, pane)
+        if tool is not None:
+            if self._last_modal_pane.get(channel_key) == pane:
+                return  # already handled this exact dialog snapshot
+            outcome = await self._auto_approve_permission(channel_key, state, tool)
+            if outcome == "approved":
+                # Dedup on the pre-approval snapshot so the same dialog
+                # can't trigger twice while the pane fades.
+                self._last_modal_pane[channel_key] = pane
+                return
+            if outcome == "gone":
+                self._last_modal_pane.pop(channel_key, None)
+                return
+            # "failed" — the dialog is still on screen. Alert below even
+            # if the footer-token detector doesn't know this dialog class.
+            modal_present = True
         if modal_present:
             if self._last_modal_pane.get(channel_key) == pane:
                 return
             await self._send_modal_idle_alert(channel_key, state, pane)
         else:
             self._last_modal_pane.pop(channel_key, None)
+
+    def _auto_approvable_tool(self, state: TmuxSessionState, pane: str) -> str | None:
+        """Normalized tool name when the pane shows a structurally verified
+        CC permission dialog for an operator-allowlisted tool, else None.
+        Claude-only: codex/nessy approval dialogs have their own wording and
+        stay on the manual path."""
+        if not self._auto_approve_tools or state.provider != "claude":
+            return None
+        tool = parse_permission_prompt(pane)
+        if tool is None or tool not in self._auto_approve_tools:
+            return None
+        return tool
+
+    async def _auto_approve_permission(
+        self, channel_key: ChannelKey, state: TmuxSessionState, tool: str
+    ) -> Literal["approved", "gone", "failed"]:
+        """Answer "1. Yes" on a verified CC tool-permission dialog.
+
+        Re-captures the pane immediately before Enter — the watchdog tick's
+        snapshot can be seconds old, and an Enter into a different modal is
+        exactly the failure mode modal_detect.py exists to prevent. After
+        Enter, re-captures once more to confirm the dialog dismissed; on
+        success posts a chat notice so every bot-made approval is visible.
+        """
+        fresh = await capture_pane(state.session_name)
+        fresh_tool = parse_permission_prompt(fresh)
+        if fresh_tool is None:
+            return "gone"  # resolved between ticks — nothing to do
+        if fresh_tool != tool:
+            logger.warning(
+                "TUI_IO: permission auto-approve skipped session=%s tool=%s fresh_tool=%s",
+                state.session_name,
+                tool,
+                fresh_tool,
+            )
+            return "failed"  # dialog changed under us — let the human look
+        try:
+            await send_enter(state.session_name)
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+            logger.warning(
+                "TUI_IO: permission auto-approve Enter failed session=%s exc=%s",
+                state.session_name,
+                type(exc).__name__,
+            )
+            return "failed"
+        await asyncio.sleep(_PERMISSION_RESOLVE_WAIT_SEC)
+        after = await capture_pane(state.session_name)
+        if parse_permission_prompt(after) is not None:
+            logger.warning(
+                "TUI_IO: permission auto-approve did not dismiss session=%s tool=%s",
+                state.session_name,
+                tool,
+            )
+            return "failed"
+        await _send_permission_notice_impl(self, channel_key, state.session_name, tool, fresh)
+        return "approved"
 
     async def send_stream(
         self,

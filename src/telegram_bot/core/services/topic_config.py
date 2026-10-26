@@ -423,6 +423,27 @@ class TopicConfig:
             log_label="update_stream_mode",
         )
 
+    async def update_cwd(self, thread_id: int, cwd: str | None) -> bool:
+        """Persist a cwd override for one topic (None = back to the bot default).
+
+        Absolute + existing directory is enforced here at write time — the
+        same validation `_parse_config` applies on read — so a typo fails
+        loudly instead of silently degrading to the default on next read.
+        """
+        if cwd is not None:
+            if not os.path.isabs(cwd):
+                logger.warning("update_cwd: relative path %r", cwd)
+                return False
+            if not os.path.isdir(cwd):
+                logger.warning("update_cwd: not a directory %r", cwd)
+                return False
+        return await self._update_topic_field(
+            thread_id=thread_id,
+            field_name="cwd",
+            value=cwd,
+            log_label="update_cwd",
+        )
+
     async def update_exec_mode(self, thread_id: int, mode: str) -> bool:
         """Persist a new exec_mode for one topic. Returns False on bad input."""
         if mode not in _VALID_EXEC_MODES:

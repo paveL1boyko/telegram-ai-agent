@@ -269,6 +269,45 @@ def test_public_bot_command_menu_includes_compact() -> None:
     assert "compact" in command_names
 
 
+def test_cwd_command_is_bot_handled_and_reserved() -> None:
+    # /cwd is persisted server-side via topic_config — it must never leak
+    # into the engine TUI as raw text. The /set_pwd alias routes the same.
+    assert commands.handle_cwd_command is not None
+    assert "/cwd" in BOT_RESERVED_COMMANDS
+    assert "/set_pwd" in BOT_RESERVED_COMMANDS
+    assert route_slash_command("/cwd") == "bot"
+    assert route_slash_command("/set_pwd /tmp") == "bot"
+
+
+def test_public_bot_command_menu_includes_cwd() -> None:
+    command_names = {command.command for command in build_bot_commands("ru")}
+    assert "cwd" in command_names
+
+
+async def test_update_cwd_validates_and_persists(tmp_path: Path) -> None:
+    config_path = tmp_path / "topic_config.json"
+    config_path.write_text(json.dumps({"topics": {"42": {"name": "x", "cwd": None}}}))
+    topic_config = TopicConfig(str(config_path))
+
+    work = tmp_path / "work"
+    work.mkdir()
+
+    # Relative and missing paths are rejected; the config stays untouched.
+    assert await topic_config.update_cwd(42, "relative/path") is False
+    assert await topic_config.update_cwd(42, str(tmp_path / "missing")) is False
+    assert json.loads(config_path.read_text())["topics"]["42"]["cwd"] is None
+
+    # An existing absolute directory persists and reads back via get_topic.
+    assert await topic_config.update_cwd(42, str(work)) is True
+    assert json.loads(config_path.read_text())["topics"]["42"]["cwd"] == str(work)
+    assert topic_config.get_topic(42).cwd == str(work)
+
+    # None clears the override, returning the topic to the bot default.
+    assert await topic_config.update_cwd(42, None) is True
+    assert json.loads(config_path.read_text())["topics"]["42"]["cwd"] is None
+    assert topic_config.get_topic(42).cwd is None
+
+
 def test_update_session_model_records_live_switch(tmp_path: Path) -> None:
     from telegram_bot.core.services.tmux_manager import TmuxManager
     from telegram_bot.core.services.tmux_state import TmuxSessionState

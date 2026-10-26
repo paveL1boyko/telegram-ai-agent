@@ -51,6 +51,11 @@ PUBLIC_BOT_COMMANDS: tuple[LocalizedBotCommand, ...] = (
     LocalizedBotCommand("engine", "Выбрать Claude Code или Codex", "Choose Claude Code or Codex"),
     LocalizedBotCommand("model", "Выбрать модель для топика", "Choose the model for this topic"),
     LocalizedBotCommand(
+        "cwd",
+        "Рабочая директория топика",
+        "Working directory for this topic",
+    ),
+    LocalizedBotCommand(
         "sendfile",
         "Отправить локальный файл в чат",
         "Send a file from disk to the chat",

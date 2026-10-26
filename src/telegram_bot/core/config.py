@@ -66,6 +66,23 @@ class Settings(BaseSettings):
     api_error_retry_limit: int = 10
     api_error_retry_prompt: str = "continue"
     api_error_retry_reset_sec: float = 300.0
+    # Auto-approval of Claude Code tool-permission dialogs. Some managed CC
+    # builds force an interactive "Do you want to proceed?" dialog on every
+    # call of certain read-only tools (e.g. WebSearch/WebFetch under a
+    # signed corporate policy) and user-side `permissions.allow` cannot
+    # lift it, so every search stalls the session until someone presses
+    # "1. Yes". For tools in this list the modal watchdog answers "1. Yes"
+    # itself after structurally verifying the dialog (question line, cursor
+    # on "1. Yes", full menu, identified tool) and posts a notice to chat;
+    # anything not listed keeps the manual alert flow. Empty = disabled.
+    # JSON list via AUTO_APPROVE_PERMISSION_TOOLS, e.g.
+    # '["WebSearch", "WebFetch"]'.
+    auto_approve_permission_tools: list[str] = []
+    # Rename forum topics to "<cwd folder> · <short model>" on /cwd and
+    # model/engine switches, so the topic list shows where each session
+    # runs. Requires the bot to have the manage_topics admin right; rename
+    # failures are logged and swallowed. Disable via TOPIC_AUTONAME=false.
+    topic_autoname: bool = True
 
 
 @functools.lru_cache(maxsize=1)

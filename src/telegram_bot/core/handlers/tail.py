@@ -97,9 +97,17 @@ _SEND_KEYS_MAP: dict[str, list[str]] = {
     "num1": ["1"],
     "num2": ["2"],
     "num3": ["3"],
+    "num4": ["4"],
 }
 
-_RECOVERY_TAIL_ACTIONS = {"ent", "num0", "num1", "num2", "num3"}
+_RECOVERY_TAIL_ACTIONS = {"ent", "num0", "num1", "num2", "num3", "num4"}
+
+# Actions that *answer* the dialog shown in a modal alert (confirm with
+# Enter, pick a numbered item, cancel with Esc). On a modal-alert message
+# such a press resolves the alert's reason to exist, so the message is
+# deleted instead of re-rendered — the topic stays clean. Navigation keys
+# (arrows/Tab/Ctrl) keep the in-place re-render: the user is still browsing.
+_MODAL_CHOICE_ACTIONS = {"ent", "esc", "num1", "num2", "num3", "num4"}
 
 # Strong references to fire-and-forget cleanup tasks. asyncio only keeps a
 # weak reference to tasks, so an unreferenced task can be GC'd mid-flight;
@@ -404,6 +412,26 @@ async def handle_tail_callback(callback: CallbackQuery, tmux_manager: TmuxManage
         return
 
     await asyncio.sleep(_SEND_KEYS_SETTLE_SEC)
+
+    # Modal alert + a choice key: the press answered (or dismissed) the
+    # dialog, so the alert has served its purpose — delete it instead of
+    # re-rendering. The watchdog dedup is reset so a still-open modal
+    # (wrong digit for the menu) re-alerts on the next tick instead of
+    # vanishing silently with the message.
+    if parsed.kind == KIND_MODAL and action in _MODAL_CHOICE_ACTIONS:
+        tmux_manager.pop_tui_panel(key)
+        tmux_manager.reset_modal_dedup(key)
+        with contextlib.suppress(Exception):
+            await message.delete()
+        if action in _RECOVERY_TAIL_ACTIONS:
+            await tmux_manager.ensure_recovery_tail(key)
+        logger.info(
+            "TUI_IO: /tui modal choice action=%s session=%s — alert deleted",
+            action,
+            session_name,
+        )
+        await callback.answer()
+        return
 
     await _rerender(
         message=message,
