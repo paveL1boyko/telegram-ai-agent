@@ -5,10 +5,12 @@ Covers the two layers of the feature:
 1. `tui/permission_prompt.parse_permission_prompt` — structural detection
    of the "Do you want to proceed?" dialog and tool-name extraction from
    the managed-policy line / classic wording / menu option 2 / tool-call
-   header fallback;
+   header fallback, including scrollback-ghost rejection (a resolved
+   dialog persists above the redrawn input box and must not parse);
 2. the TmuxManager watchdog hook — Enter on the verified dialog for
    operator-allowlisted tools only, with re-capture guards on both sides
-   of the keypress and fall-through to the manual idle alert on failure.
+   of the keypress, bounded retries when an Enter is swallowed mid-render,
+   and fall-through to the manual idle alert on failure.
 """
 
 from __future__ import annotations
@@ -82,6 +84,30 @@ IDLE_PANE = """
 ────────────────────────────────────────
   esc to interrupt
 """
+
+# A resolved dialog stays visible in scrollback while CC redraws its real
+# UI below it — input-box sandwich + status line. Captured from a live
+# session (2026-10-27): the watchdog parsed this ghost as a live dialog
+# and sent Enter into the user's input box on every tick.
+GHOST_ABOVE_INPUT_BOX = (
+    WEBSEARCH_DIALOG
+    + "\n"
+    + "─" * 60
+    + "\n❯ \n"
+    + "─" * 60
+    + "\n"
+    + "  proj  main | model | $1.00 session | ctx:~10k/200k\n"
+    + "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+)
+
+# Same ghost, but with user text typed into the input box (`❯ 2` — seen
+# live when a bogus ghost-alert's button typed "2" into the box).
+GHOST_WITH_TYPED_INPUT = (
+    WEBSEARCH_DIALOG + "\n" + "─" * 60 + "\n❯ 2\n" + "─" * 60 + "\n  proj  main\n"
+)
+
+# Ghost above the busy line (CC already working after the dialog resolved).
+GHOST_ABOVE_BUSY_LINE = WEBSEARCH_DIALOG + "\n⏺ Working on it…\n  esc to interrupt\n"
 
 
 def test_parse_managed_build_websearch_dialog() -> None:
@@ -160,6 +186,29 @@ def test_parse_rejects_non_dialog_panes() -> None:
     # The question quoted in scrollback without a live menu is not a dialog.
     quoted = "Earlier CC asked: Do you want to proceed? and I said no"
     assert parse_permission_prompt(quoted) is None
+
+
+def test_parse_rejects_scrollback_ghost_above_input_box() -> None:
+    """A resolved dialog persists in scrollback; with CC's input box
+    rendered below it, it must NOT parse — acting on the ghost sends Enter
+    into the user's input box on every watchdog tick (incident 2026-10-27)."""
+    assert parse_permission_prompt(GHOST_ABOVE_INPUT_BOX) is None
+
+
+def test_parse_rejects_ghost_with_typed_text_in_input() -> None:
+    assert parse_permission_prompt(GHOST_WITH_TYPED_INPUT) is None
+
+
+def test_parse_rejects_ghost_above_busy_line() -> None:
+    assert parse_permission_prompt(GHOST_ABOVE_BUSY_LINE) is None
+
+
+def test_parse_live_dialog_below_ghost_uses_own_rule_line() -> None:
+    """Ghost above, live dialog at the bottom: the bottom-most question
+    wins, and the tool comes from the LIVE dialog's own rule line — the
+    old first-match-in-tail logic would have returned the ghost's tool."""
+    pane = WEBFETCH_ALLOW_DIALOG + "\n⏺ Done thinking\n" + WEBSEARCH_DIALOG
+    assert parse_permission_prompt(pane) == "websearch"
 
 
 def test_normalize_tool_name() -> None:
@@ -284,16 +333,47 @@ def test_watchdog_skips_non_claude_provider(tmp_path: Path, monkeypatch) -> None
 
 
 def test_enter_failure_falls_through_to_alert(tmp_path: Path, monkeypatch) -> None:
-    """Dialog still on screen after Enter (keypress lost / new dialog for
-    the same tool) — the user must get the manual alert."""
+    """Dialog still on screen after every Enter attempt (keypresses lost /
+    new dialog for the same tool each time) — bounded retries exhaust and
+    the user must get the manual alert."""
     manager, _state = _make_manager(tmp_path, tools=["WebSearch"])
     calls = _patch_io(monkeypatch, [WEBSEARCH_DIALOG, WEBSEARCH_DIALOG, WEBSEARCH_DIALOG])
     alerts = _patch_alert(monkeypatch, manager)
 
     asyncio.run(manager._check_channel_modal((1, 2)))
 
-    assert calls["enter"] == ["cc-1-2"]
+    assert calls["enter"] == ["cc-1-2"] * 3
     assert alerts == [WEBSEARCH_DIALOG]
+
+
+def test_watchdog_retries_enter_lost_mid_render(tmp_path: Path, monkeypatch) -> None:
+    """First Enter swallowed (dialog caught mid-render), the retry resolves:
+    two Enters, one approval, no alert."""
+    manager, _state = _make_manager(tmp_path, tools=["WebSearch"])
+    calls = _patch_io(
+        monkeypatch,
+        [WEBSEARCH_DIALOG, WEBSEARCH_DIALOG, WEBSEARCH_DIALOG, IDLE_PANE],
+    )
+    alerts = _patch_alert(monkeypatch, manager)
+
+    asyncio.run(manager._check_channel_modal((1, 2)))
+
+    assert calls["enter"] == ["cc-1-2"] * 2
+    assert alerts == []
+    assert manager._last_modal_pane[(1, 2)] == WEBSEARCH_DIALOG
+
+
+def test_watchdog_ignores_scrollback_ghost(tmp_path: Path, monkeypatch) -> None:
+    """Ghost above the input box: no Enter, no alert — before the fix the
+    watchdog pressed Enter into the user's input box every tick (2026-10-27)."""
+    manager, _state = _make_manager(tmp_path, tools=["WebSearch"])
+    calls = _patch_io(monkeypatch, [GHOST_ABOVE_INPUT_BOX])
+    alerts = _patch_alert(monkeypatch, manager)
+
+    asyncio.run(manager._check_channel_modal((1, 2)))
+
+    assert calls["enter"] == []
+    assert alerts == []
 
 
 def test_dialog_gone_between_ticks_needs_no_action(tmp_path: Path, monkeypatch) -> None:

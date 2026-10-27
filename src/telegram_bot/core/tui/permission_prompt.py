@@ -22,7 +22,17 @@ in the pane tail:
    variant ``Do you want to allow Claude to …?`` some builds use);
 2. the selection cursor on the first option (``❯ 1. Yes``);
 3. the full menu (a ``3. No`` line);
-4. an extractable tool name.
+4. the dialog must be LIVE: the bottom-most question candidate wins, and
+   nothing below its menu may look like CC chrome (input-box separators,
+   a ``❯`` prompt line, the status line, ``esc to interrupt``). A
+   resolved dialog persists in scrollback as a "ghost" — question,
+   cursor and menu all still match — while CC redraws the input box
+   below it. Acting on a ghost sends Enter into the user's input box on
+   every watchdog tick and reports a false "did not dismiss" (incident
+   2026-10-27: ~10 spurious Enters + alert spam over 95 s on one
+   channel);
+5. an extractable tool name, scoped to THIS dialog (last rule line above
+   its question wins, so a ghost higher up cannot mislabel it).
 
 Enter is only ever sent after a fresh re-capture re-confirms the exact
 same dialog, so a stale watchdog snapshot can never bleed an Enter into an
@@ -68,6 +78,20 @@ _DONT_ASK_RE = re.compile(r"don't ask again for (.+?) commands? in ")
 # before the question line, last match wins (see parse_permission_prompt).
 _TOOL_HEADER_RE = re.compile(r"^\s*(?:⏺\s*)?([A-Z][A-Za-z0-9 ]{1,30}?)\(", re.MULTILINE)
 
+# CC chrome that may only appear BELOW a resolved (ghost) dialog: a live
+# permission dialog is the bottom-most element of the pane — only its own
+# "Esc to cancel" footer follows the menu. If any of these show up below
+# the menu, the dialog already scrolled into history and the input box /
+# status line sits under it; pressing Enter on that snapshot would land in
+# the user's input box.
+_GHOST_BELOW_RE = re.compile(
+    r"^\s*─{10,}\s*$"  # input-box separator (same threshold as modal_detect)
+    r"|^\s*❯(?:\s|$)"  # input prompt line, empty or with typed text
+    r"|bypass permissions on"  # status line
+    r"|esc to interrupt",  # busy line under a resolved dialog
+    re.MULTILINE,
+)
+
 
 def normalize_tool_name(name: str) -> str:
     """Canonical form for allowlist matching: ``Web Search`` / ``WebSearch``
@@ -86,23 +110,47 @@ def parse_permission_prompt(pane: str) -> str | None:
     if not pane:
         return None
     tail = "\n".join(pane.splitlines()[-_DIALOG_SCAN_LINES:])
-    question = _PROCEED_RE.search(tail)
-    if question is None:
+    questions = list(_PROCEED_RE.finditer(tail))
+    if not questions:
         return None
-    if _CURSOR_YES_RE.search(tail) is None:
+    # Resolved dialogs persist in scrollback as ghosts; only the
+    # bottom-most question can belong to a LIVE dialog. Anchoring on the
+    # last match also confines the cursor/menu checks to that dialog's own
+    # block, so a ghost above can't satisfy them for a live dialog below.
+    question = questions[-1]
+    block = tail[question.start() :]
+    if _CURSOR_YES_RE.search(block) is None:
         return None
-    if _MENU_NO_RE.search(tail) is None:
+    menu = None
+    for m in _MENU_NO_RE.finditer(block):
+        menu = m
+    if menu is None:
         return None
-    for pattern in (_PERMISSION_RULE_RE, _NEEDS_PERMISSION_RE, _DONT_ASK_RE):
-        m = pattern.search(tail)
-        if m is not None:
-            return normalize_tool_name(m.group(1))
-    # Header fallback: restrict to the text BEFORE the question and take
-    # the LAST match — the real dialog's tool-call header is the closest
-    # one above the question; a stale "Web Search(...)" quoted higher in
-    # scrollback must not mislabel a different tool's dialog.
+    # Liveness: below a live dialog's menu there is only its own footer.
+    # CC chrome below the menu means the dialog is a scrollback ghost and
+    # the input box sits under it — acting on it would send Enter into the
+    # user's input box on every watchdog tick.
+    if _GHOST_BELOW_RE.search(block[menu.end() :]):
+        return None
+    # Tool name, scoped to THIS dialog: rule/needs-permission lines sit
+    # above the question — last match wins, so a ghost's rule line higher
+    # in scrollback cannot mislabel the live dialog.
+    above = tail[: question.start()]
+    for pattern in (_PERMISSION_RULE_RE, _NEEDS_PERMISSION_RE):
+        found = None
+        for m in pattern.finditer(above):
+            found = m
+        if found is not None:
+            return normalize_tool_name(found.group(1))
+    dont_ask = _DONT_ASK_RE.search(block)
+    if dont_ask is not None:
+        return normalize_tool_name(dont_ask.group(1))
+    # Header fallback: the LAST header before the question — the real
+    # dialog's tool-call header is the closest one above the question; a
+    # stale "Web Search(...)" quoted higher in scrollback must not
+    # mislabel a different tool's dialog.
     header = None
-    for m in _TOOL_HEADER_RE.finditer(tail[: question.start()]):
+    for m in _TOOL_HEADER_RE.finditer(above):
         header = m
     if header is not None:
         return normalize_tool_name(header.group(1))

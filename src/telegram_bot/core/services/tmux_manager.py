@@ -178,6 +178,14 @@ _ENTER_RETRY_LIMIT = 3
 # on the next tick.
 _PERMISSION_RESOLVE_WAIT_SEC = 0.7
 
+# How many Enter attempts `_auto_approve_permission` makes before giving
+# up. A single Enter can be lost when the capture catches the dialog
+# mid-render (menu visible, footer not yet painted — keystroke swallowed,
+# seen live on 2026-10-27). Each retry re-verifies the same-tool dialog on
+# a fresh capture before pressing again, so the safety invariant (Enter
+# only into a structurally verified dialog) holds on every attempt.
+_PERMISSION_ENTER_ATTEMPTS = 3
+
 # How often the activity watchdog stats each session's transcript for growth
 # beyond the delivered offset. 10s keeps tmux-typed turns near-realtime in
 # Telegram while staying far below the cost of the modal watchdog's
@@ -1736,41 +1744,68 @@ class TmuxManager:
         Re-captures the pane immediately before Enter — the watchdog tick's
         snapshot can be seconds old, and an Enter into a different modal is
         exactly the failure mode modal_detect.py exists to prevent. After
-        Enter, re-captures once more to confirm the dialog dismissed; on
-        success posts a chat notice so every bot-made approval is visible.
+        each Enter, re-captures to confirm the dialog dismissed; a still
+        live same-tool dialog is retried (a capture can catch the dialog
+        mid-render, and an Enter pressed before the footer paints is
+        swallowed). On success posts a chat notice so every bot-made
+        approval is visible.
         """
-        fresh = await capture_pane(state.session_name)
-        fresh_tool = parse_permission_prompt(fresh)
-        if fresh_tool is None:
+        verified = await capture_pane(state.session_name)
+        verified_tool = parse_permission_prompt(verified)
+        if verified_tool is None:
             return "gone"  # resolved between ticks — nothing to do
-        if fresh_tool != tool:
+        if verified_tool != tool:
             logger.warning(
                 "TUI_IO: permission auto-approve skipped session=%s tool=%s fresh_tool=%s",
                 state.session_name,
                 tool,
-                fresh_tool,
+                verified_tool,
             )
             return "failed"  # dialog changed under us — let the human look
-        try:
-            await send_enter(state.session_name)
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
-            logger.warning(
-                "TUI_IO: permission auto-approve Enter failed session=%s exc=%s",
-                state.session_name,
-                type(exc).__name__,
-            )
-            return "failed"
-        await asyncio.sleep(_PERMISSION_RESOLVE_WAIT_SEC)
-        after = await capture_pane(state.session_name)
-        if parse_permission_prompt(after) is not None:
-            logger.warning(
-                "TUI_IO: permission auto-approve did not dismiss session=%s tool=%s",
+        for attempt in range(1, _PERMISSION_ENTER_ATTEMPTS + 1):
+            try:
+                await send_enter(state.session_name)
+            except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+                logger.warning(
+                    "TUI_IO: permission auto-approve Enter failed session=%s exc=%s",
+                    state.session_name,
+                    type(exc).__name__,
+                )
+                return "failed"
+            await asyncio.sleep(_PERMISSION_RESOLVE_WAIT_SEC)
+            after = await capture_pane(state.session_name)
+            after_tool = parse_permission_prompt(after)
+            if after_tool is None:
+                # Dialog gone — approved. A resolved dialog's scrollback
+                # ghost parses as None, so this can't be a fade artifact.
+                await _send_permission_notice_impl(
+                    self, channel_key, state.session_name, tool, verified
+                )
+                return "approved"
+            if after_tool != tool:
+                logger.warning(
+                    "TUI_IO: permission auto-approve switched session=%s tool=%s after_tool=%s",
+                    state.session_name,
+                    tool,
+                    after_tool,
+                )
+                return "failed"  # different dialog now — let the human look
+            # Same-tool dialog still live: Enter was lost (mid-render
+            # capture), or the next same-tool dialog was issued instantly;
+            # pressing Enter again is the right move in both cases.
+            logger.info(
+                "TUI_IO: permission auto-approve retry session=%s tool=%s attempt=%d",
                 state.session_name,
                 tool,
+                attempt,
             )
-            return "failed"
-        await _send_permission_notice_impl(self, channel_key, state.session_name, tool, fresh)
-        return "approved"
+        logger.warning(
+            "TUI_IO: permission auto-approve did not dismiss session=%s tool=%s attempts=%d",
+            state.session_name,
+            tool,
+            _PERMISSION_ENTER_ATTEMPTS,
+        )
+        return "failed"
 
     async def send_stream(
         self,
