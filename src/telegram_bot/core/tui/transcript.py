@@ -149,14 +149,43 @@ def parse_jsonl_line(raw: str) -> ParsedEvent | None:
     return ParsedEvent(kind="skip", payload={"reason": f"unknown:{etype}"})
 
 
+def _events_for_parsed(parsed: ParsedEvent) -> list[StreamEvent]:
+    """Map a parsed transcript line to StreamEvents (no turn-boundary logic).
+
+    `thinking`, `tool_result`, `skip`, and unknown kinds collapse to `[]`
+    — the caller (TmuxManager) owns warn-once bookkeeping for unknown types.
+    """
+    if parsed.kind == "text":
+        text = parsed.payload.get("text", "")
+        return [StreamEvent("text", text)] if text else []
+    if parsed.kind == "tool_use":
+        name = parsed.payload.get("name", "")
+        tool_input = parsed.payload.get("input")
+        status = _tool_status(name, tool_input if isinstance(tool_input, dict) else None)
+        return [StreamEvent("status", status)]
+    if parsed.kind == "api_error":
+        return [StreamEvent("api_error", parsed.payload.get("text", ""))]
+    if parsed.kind == "status":
+        text = parsed.payload.get("text", "")
+        return [StreamEvent("status", text)] if text else []
+    return []
+
+
 def parse_transcript_event(
     raw: str,
 ) -> tuple[list[StreamEvent], str | None]:
     """Adapt one transcript jsonl line to the bot's StreamEvent pipeline.
 
     Returns `(events, session_id)` mirroring `claude.parse_cc_event`'s shape.
-    `thinking`, `tool_result`, `skip`, and unknown types collapse to `([], None)`
-    — the caller (TmuxManager) owns warn-once bookkeeping for unknown types.
+
+    Turn boundary: the CC TUI transcript has no `result` records, so an
+    assistant message with ``stop_reason == "end_turn"`` is the only precise
+    "turn fully done" marker available — we append a bare `result` sentinel
+    after the message's own events. tail_runner forwards it (empty content,
+    so no result_message is synthesized) and the UI posts its completion
+    signal on it. Mid-turn model stops carry ``stop_reason == "tool_use"``
+    and never trigger the sentinel; user interrupts produce no end_turn, so
+    /cancel stays quiet.
     """
     parsed = parse_jsonl_line(raw)
     if parsed is None:
@@ -165,6 +194,7 @@ def parse_transcript_event(
     # session_id is only surfaced when the raw event carries an explicit field.
     # Not observed in PoC on CC 2.1.114 but the defensive read is cheap.
     session_id: str | None = None
+    evt: dict[str, Any] = {}
     try:
         evt = json.loads(raw)
         sid = evt.get("sessionId")
@@ -173,28 +203,10 @@ def parse_transcript_event(
     except json.JSONDecodeError:
         pass
 
-    if parsed.kind in ("skip", "thinking", "tool_result"):
-        return [], session_id
-
-    if parsed.kind == "text":
-        text = parsed.payload.get("text", "")
-        if not text:
-            return [], session_id
-        return [StreamEvent("text", text)], session_id
-
-    if parsed.kind == "tool_use":
-        name = parsed.payload.get("name", "")
-        tool_input = parsed.payload.get("input")
-        status = _tool_status(name, tool_input if isinstance(tool_input, dict) else None)
-        return [StreamEvent("status", status)], session_id
-
-    if parsed.kind == "api_error":
-        return [StreamEvent("api_error", parsed.payload.get("text", ""))], session_id
-
-    if parsed.kind == "status":
-        text = parsed.payload.get("text", "")
-        if not text:
-            return [], session_id
-        return [StreamEvent("status", text)], session_id
-
-    return [], session_id
+    events = _events_for_parsed(parsed)
+    if (
+        evt.get("type") == "assistant"
+        and (evt.get("message") or {}).get("stop_reason") == "end_turn"
+    ):
+        events.append(StreamEvent("result", ""))
+    return events, session_id

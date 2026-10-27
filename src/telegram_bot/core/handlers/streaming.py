@@ -678,6 +678,23 @@ async def send_streaming_response(
                 ctx.accumulated_text += event.content
             return
 
+        # Turn-completion sentinel (tmux only — synthesized on
+        # stop_reason=end_turn in tui/transcript.py and forwarded by
+        # TmuxManager._on_event_with_processing). The answer itself already
+        # arrived as text/result_message events; ✅ is the explicit "task
+        # fully done, next one accepted" signal. Deliberately NOT silent —
+        # it is the one message the operator waits for.
+        if event.type == "result" and ctx.used_tmux:
+            try:
+                await ctx.message.answer("✅")
+            except Exception:
+                logger.warning(
+                    "turn-done marker send failed on channel %s",
+                    ctx.channel_key,
+                    exc_info=True,
+                )
+            return
+
         # Central empty-content guard (W1.2). CC emits empty events at
         # compact boundaries, token-count-only events, and empty thinking
         # blocks. Forwarding those to Telegram fails — split_html_message
@@ -806,6 +823,13 @@ def build_recovery_on_event_factory(
             # Same empty-content guard as the main streaming path — an empty
             # chunk would make message.answer raise TelegramBadRequest.
             if event.type in ("status", "text", "result_message") and not event.content.strip():
+                return
+
+            # Turn-completion sentinel (synthesized on stop_reason=end_turn —
+            # see tui/transcript.py): same ✅ completion signal as the
+            # user-message path in send_streaming_response.
+            if event.type == "result":
+                await bot.send_message(chat_id, "✅", message_thread_id=thread_id)
                 return
 
             if event.type == "status":

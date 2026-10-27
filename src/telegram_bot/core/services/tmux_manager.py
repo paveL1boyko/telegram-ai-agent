@@ -1830,9 +1830,14 @@ class TmuxManager:
 
         async def _on_event_with_processing(event: StreamEvent) -> None:
             if event.type == "result":
-                # Bare sentinel (empty result) — CC finished without text output.
-                # Clear flag only; nothing to forward to on_event.
+                # Bare sentinel — CC finished the turn (for the TUI
+                # transcript it is synthesized on stop_reason=end_turn; see
+                # tui/transcript.py). Clear the flag, then forward: the UI
+                # posts its turn-done completion signal on this event.
                 self._is_processing[channel_key] = False
+                ret = on_event(event)
+                if asyncio.iscoroutine(ret):
+                    await ret
                 return
             ret = on_event(event)
             if asyncio.iscoroutine(ret):
