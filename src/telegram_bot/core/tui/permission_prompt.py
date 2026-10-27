@@ -18,7 +18,8 @@ Everything not on the list keeps the manual alert flow.
 Detection is deliberately structural and strict — ALL of these must hold
 in the pane tail:
 
-1. the question line ``Do you want to proceed?``;
+1. the question line (``Do you want to proceed?``, or the per-tool
+   variant ``Do you want to allow Claude to …?`` some builds use);
 2. the selection cursor on the first option (``❯ 1. Yes``);
 3. the full menu (a ``3. No`` line);
 4. an extractable tool name.
@@ -38,7 +39,12 @@ import re
 # reaching deep into scrollback.
 _DIALOG_SCAN_LINES = 40
 
-_PROCEED_RE = re.compile(r"Do you want to proceed\?")
+# The question line. Most builds ask "Do you want to proceed?"; some
+# phrase it per-tool, e.g. "Do you want to allow Claude to fetch this
+# content?" (seen on a managed build, 2026-10-26). Both name the same
+# modal — accept either so a CLI build update can't silently disable
+# auto-approval.
+_PROCEED_RE = re.compile(r"Do you want to (?:proceed|allow Claude to [^\n?]{0,100})\?")
 
 # Selection cursor on the first option. Enter confirms the cursor row, so
 # this is the load-bearing check: without the cursor on "1. Yes" we must

@@ -56,6 +56,24 @@ BASH_DIALOG = """
  Esc to cancel
 """
 
+# Per-tool question wording, captured verbatim from a managed-build
+# WebFetch dialog (2026-10-26): "Do you want to allow Claude to fetch
+# this content?" instead of "Do you want to proceed?".
+WEBFETCH_ALLOW_DIALOG = """
+ Fetch
+
+   url: https://www.ozon.ru/search/?text=Baoba+BZ-495
+   │ prompt: Extract product titles, prices, and any specs
+   Claude wants to fetch content from www.ozon.ru
+
+ Permission rule WebFetch requires confirmation for this tool.
+
+ Do you want to allow Claude to fetch this content?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for www.ozon.ru
+   3. No, and tell Claude what to do differently (esc)
+"""
+
 IDLE_PANE = """
 ⏺ Working on it…
 
@@ -73,6 +91,12 @@ def test_parse_managed_build_websearch_dialog() -> None:
 def test_parse_managed_build_webfetch_dialog() -> None:
     pane = WEBSEARCH_DIALOG.replace("WebSearch", "WebFetch").replace("Web Search", "Web Fetch")
     assert parse_permission_prompt(pane) == "webfetch"
+
+
+def test_parse_allow_claude_question_wording() -> None:
+    """Per-tool question variant ("Do you want to allow Claude to …?")
+    must parse like the classic "Do you want to proceed?" dialog."""
+    assert parse_permission_prompt(WEBFETCH_ALLOW_DIALOG) == "webfetch"
 
 
 def test_parse_classic_needs_permission_wording() -> None:
