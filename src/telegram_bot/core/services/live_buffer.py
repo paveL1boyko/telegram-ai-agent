@@ -39,7 +39,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
@@ -54,8 +54,11 @@ _HEADER_CONTINUED = "⏳ Думаю…\n"
 
 
 def _ts() -> str:
-    """UTC HH:MM:SS prefix — timezone-free on purpose; the bot runs in UTC."""
-    return datetime.now(UTC).strftime("%H:%M:%S")
+    """Local-time HH:MM:SS prefix. The buffer renders for the chat UI, so
+    it speaks the host's timezone (the operator's own in a self-hosted
+    deployment) — a UTC prefix reads as "3 hours off" for anyone not
+    actually in UTC."""
+    return datetime.now().astimezone().strftime("%H:%M:%S")
 
 
 class LiveStatusBuffer:
