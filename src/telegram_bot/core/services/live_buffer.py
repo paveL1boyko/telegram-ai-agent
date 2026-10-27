@@ -16,6 +16,10 @@ Lifecycle:
     ...
     await buf.close()   # idempotent, flushes, cancels worker
 
+Rendering: all lines but the last are wrapped in an expandable
+blockquote (collapses to a one-line preview in the chat); the latest
+line stays outside the quote so current activity is always visible.
+
 Threading model:
 
 - A background asyncio.Task (`_worker`) wakes up every `throttle_sec` and
@@ -183,12 +187,24 @@ class LiveStatusBuffer:
         # Both branches include the header in the rendered text, so the overflow
         # guard (len(render()) > max_chars) and the trim loop already account for
         # the header length — body capacity is implicitly max_chars - len(header).
-        body = "\n".join(self._lines)
+        body = self._render_body()
         if self._is_continuation:
             return _HEADER_CONTINUED + body
         elif self._header_text:
             return self._header_text + "\n" + body
         return body
+
+    def _render_body(self) -> str:
+        """History collapses into an expandable blockquote; the latest line
+        stays outside the quote so current activity is visible in the chat
+        without tapping "show more". Telegram has no font-size entity, so
+        collapsing is the only way to shrink the log's visual footprint.
+        The collapsed preview shows the quote's first (oldest) line — the
+        chronological anchor of the page."""
+        if len(self._lines) <= 1:
+            return "\n".join(self._lines)
+        quoted = "\n".join(self._lines[:-1])
+        return f"<blockquote expandable>{quoted}</blockquote>\n{self._lines[-1]}"
 
     async def _rotate_locked(self) -> bool:
         """Close the current page and start a new one. Must be called under lock.
