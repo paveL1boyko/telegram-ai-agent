@@ -683,10 +683,12 @@ async def send_streaming_response(
         # TmuxManager._on_event_with_processing). The answer itself already
         # arrived as text/result_message events; ✅ is the explicit "task
         # fully done, next one accepted" signal. Deliberately NOT silent —
-        # it is the one message the operator waits for.
+        # it is the one message the operator waits for. Never emoji-only:
+        # Telegram renders bare-emoji messages huge, the trailing word
+        # keeps the line normal-sized.
         if event.type == "result" and ctx.used_tmux:
             try:
-                await ctx.message.answer("✅")
+                await ctx.message.answer(t("ui.turn_done"))
             except Exception:
                 logger.warning(
                     "turn-done marker send failed on channel %s",
@@ -829,7 +831,7 @@ def build_recovery_on_event_factory(
             # see tui/transcript.py): same ✅ completion signal as the
             # user-message path in send_streaming_response.
             if event.type == "result":
-                await bot.send_message(chat_id, "✅", message_thread_id=thread_id)
+                await bot.send_message(chat_id, t("ui.turn_done"), message_thread_id=thread_id)
                 return
 
             if event.type == "status":

@@ -28,6 +28,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Hi! I'll forward your messages to Claude Code. Just send me anything."
         ),
         "ui.thinking": "⏳ Thinking...",
+        # Turn-done marker. Never emoji-only: Telegram renders bare-emoji
+        # messages huge; trailing text keeps it a normal-sized line.
+        "ui.turn_done": "✅ Done",
         "ui.recognizing_voice": "⏳ Transcribing voice...",
         "ui.processing_forwards": "⏳ Processing forwarded messages...",
         "ui.processing_files": "⏳ Processing files...",
@@ -321,6 +324,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Привет! Я перешлю твои сообщения в Claude Code. Просто отправь мне сообщение."
         ),
         "ui.thinking": "⏳ Думаю...",
+        # Turn-done marker. Never emoji-only: Telegram renders bare-emoji
+        # messages huge; trailing text keeps it a normal-sized line.
+        "ui.turn_done": "✅ Готово",
         "ui.recognizing_voice": "⏳ Распознаю голосовое...",
         "ui.processing_forwards": "⏳ Обрабатываю пересланные сообщения...",
         "ui.processing_files": "⏳ Обрабатываю файлы...",

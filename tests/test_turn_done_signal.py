@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from telegram_bot.core.handlers.streaming import build_recovery_on_event_factory
+from telegram_bot.core.messages import t
 from telegram_bot.core.services.claude import StreamEvent
 from telegram_bot.core.services.topic_config import TopicConfig
 from telegram_bot.core.tui.transcript import parse_transcript_event
@@ -88,6 +89,8 @@ async def test_recovery_factory_posts_turn_done_marker(tmp_path: Path) -> None:
 
     await on_event(StreamEvent("result", ""))
 
-    assert [m["text"] for m in bot.sent] == ["✅"]
+    # Not a bare ✅: Telegram renders emoji-only messages huge — the marker
+    # always carries the localized word to stay a normal-sized line.
+    assert [m["text"] for m in bot.sent] == [t("ui.turn_done")]
     assert bot.sent[0]["chat_id"] == 100
     assert bot.sent[0]["message_thread_id"] == 42
