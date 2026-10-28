@@ -644,6 +644,88 @@ async def on_resume_cancel(callback: CallbackQuery, picker_store: PickerStore) -
     await callback.answer()
 
 
+@router.message(Command("autocompact"))
+async def handle_autocompact_command(
+    message: Message,
+    command: CommandObject,
+    topic_config: TopicConfig,
+    settings: Settings,
+    tmux_manager: TmuxManager,
+) -> None:
+    """Show or change the auto-compact threshold of the current topic.
+
+    Bare `/autocompact` reports the effective threshold (topic override or
+    bot default) and the measured context size. `N` / `NNNk` sets a topic
+    override, `off` disables it for this topic, `default` clears the
+    override. The watchdog compares the context size from the session
+    transcript against this threshold every few minutes and types the
+    engine's compact command on overflow.
+    """
+    _, thread_id = channel_key(message)
+    if thread_id is None:
+        await message.answer(t("ui.stream_mode_not_in_forum"))
+        return
+
+    def _fmt(value: int) -> str:
+        return t("ui.auto_compact_disabled") if value <= 0 else f"{value:,}"
+
+    arg = (command.args or "").strip().lower()
+    topic = topic_config.get_topic(thread_id)
+    default = max(0, settings.auto_compact_tokens)
+
+    if not arg:
+        threshold = tmux_manager.auto_compact_threshold(channel_key(message))
+        source = t(
+            "ui.auto_compact_source_override"
+            if topic.auto_compact_tokens is not None
+            else "ui.auto_compact_source_default"
+        )
+        tokens = tmux_manager.context_tokens(channel_key(message))
+        await message.answer(
+            t(
+                "ui.auto_compact_status",
+                threshold=_fmt(threshold),
+                source=source,
+                tokens=f"{tokens:,}" if tokens is not None else t("ui.auto_compact_unknown"),
+                default=_fmt(default),
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    if arg == "default":
+        if not await topic_config.update_auto_compact_tokens(thread_id, None):
+            await message.answer(t("ui.auto_compact_bad_value"), parse_mode="HTML")
+            return
+        await message.answer(
+            t("ui.auto_compact_default", threshold=_fmt(default)), parse_mode="HTML"
+        )
+        return
+
+    if arg == "off":
+        if not await topic_config.update_auto_compact_tokens(thread_id, 0):
+            await message.answer(t("ui.auto_compact_bad_value"), parse_mode="HTML")
+            return
+        await message.answer(t("ui.auto_compact_off"), parse_mode="HTML")
+        return
+
+    raw, _, suffix = arg.partition("k")
+    try:
+        value = int(raw)
+        if suffix:
+            value *= 1000
+    except ValueError:
+        await message.answer(t("ui.auto_compact_bad_value"), parse_mode="HTML")
+        return
+    if value <= 0:
+        await message.answer(t("ui.auto_compact_bad_value"), parse_mode="HTML")
+        return
+    if not await topic_config.update_auto_compact_tokens(thread_id, value):
+        await message.answer(t("ui.auto_compact_bad_value"), parse_mode="HTML")
+        return
+    await message.answer(t("ui.auto_compact_set", threshold=_fmt(value)), parse_mode="HTML")
+
+
 @router.message(Command("stream"))
 async def handle_stream_mode(message: Message, topic_config: TopicConfig) -> None:
     """Show a 3-button picker to switch stream_mode for the current topic."""

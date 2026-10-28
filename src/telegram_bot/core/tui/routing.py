@@ -34,6 +34,7 @@ BOT_RESERVED_COMMANDS = frozenset(
         "/day",
         "/tui",
         "/compact",
+        "/autocompact",
         "/cwd",
         "/set_pwd",
     }

@@ -350,6 +350,12 @@ still exists as a legacy alias, but `/clear` is the command shown in the menu.
 - `/cancel`: cancel current processing.
 - `/compact`: tmux mode only; compress the context of the live session without
   losing the conversation thread.
+- `/autocompact`: show or set the per-topic auto-compact threshold. The bot
+  reads the context size from the live Claude session transcript every
+  `AUTO_COMPACT_CHECK_SEC` (default 300 s) and sends `/compact` automatically
+  once it exceeds the threshold (`AUTO_COMPACT_TOKENS`, default 220000).
+  `/autocompact 150k` overrides the topic, `/autocompact off` disables it,
+  `/autocompact default` returns to the bot default.
 - `/language`: show or switch UI language, for example `/language ru`.
 - `/uimode`: forum topics only; choose `tmux` or `subprocess`. Switching from
   `tmux` to `subprocess` stops the active tmux session.

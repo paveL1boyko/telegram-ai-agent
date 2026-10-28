@@ -132,6 +132,7 @@ from telegram_bot.core.services.topic_runtime import (
     resolve_topic_runtime_config,
 )
 from telegram_bot.core.tui.capture import await_prompt_ready
+from telegram_bot.core.tui.context_usage import read_context_usage
 from telegram_bot.core.tui.modal_detect import (
     capture_pane,
     claude_input_bar_content,
@@ -312,6 +313,12 @@ class TmuxManager:
         ) = None
         # Activity watchdog task — see start_activity_watchdog.
         self._activity_watchdog_task: asyncio.Task[None] | None = None
+        # Auto-compact watchdog — see start_auto_compact_watchdog. The map
+        # remembers which transcript line triggered the last `/compact` per
+        # channel, so one oversized measurement cannot fire twice.
+        self._auto_compact_task: asyncio.Task[None] | None = None
+        self._auto_compact_default_tokens = 0
+        self._auto_compact_seen: dict[ChannelKey, str] = {}
         # Per-channel lock around send_direct's capture→send-keys→verify→Enter
         # sequence. Without it, two overlapping user messages race on shared
         # pane state.
@@ -2567,6 +2574,108 @@ class TmuxManager:
         if size <= state.offset:
             return
         await self._start_recovery_tail(channel_key, state, output_path, reason="activity")
+
+    # --- Auto-compact watchdog ---
+
+    def start_auto_compact_watchdog(self, *, default_tokens: int, interval_sec: float) -> None:
+        """Launch the background task that compacts oversized sessions.
+
+        Every `interval_sec` each live Claude session's transcript is read
+        for its current context size (`tui/context_usage.py`); once it
+        exceeds the topic's threshold (`TopicSettings.auto_compact_tokens`,
+        falling back to `default_tokens`), the engine's compact command is
+        typed into the pane exactly as a user `/compact` would be and a
+        notice is posted. `default_tokens=0` with no topic overrides makes
+        the loop a no-op. Idempotent.
+        """
+        self._auto_compact_default_tokens = max(0, default_tokens)
+        if self._auto_compact_task is not None:
+            return
+        self._auto_compact_task = asyncio.create_task(self._auto_compact_loop(interval_sec))
+
+    async def _auto_compact_loop(self, interval_sec: float) -> None:
+        while True:
+            await asyncio.sleep(interval_sec)
+            for key in list(self._sessions.keys()):
+                try:
+                    await self._check_channel_context(key)
+                except Exception:
+                    logger.warning("auto-compact tick failed for %s", key, exc_info=True)
+
+    def auto_compact_threshold(self, channel_key: ChannelKey) -> int:
+        """Effective threshold for a channel: topic override, else the bot
+        default. 0 means disabled."""
+        thread_id = channel_key[1]
+        get_topic = getattr(self._topic_config, "get_topic", None)
+        override = None
+        if thread_id is not None and get_topic is not None:
+            override = getattr(get_topic(thread_id), "auto_compact_tokens", None)
+        if isinstance(override, int) and not isinstance(override, bool):
+            return max(0, override)
+        return self._auto_compact_default_tokens
+
+    def context_tokens(self, channel_key: ChannelKey) -> int | None:
+        """Current context size of the channel's session, if measurable."""
+        state = self._sessions.get(channel_key)
+        if state is None or state.provider != "claude":
+            return None
+        output_path = self._transcript_path_for_state(state)
+        if output_path is None:
+            return None
+        usage = read_context_usage(output_path)
+        return usage.tokens if usage else None
+
+    async def _check_channel_context(self, channel_key: ChannelKey) -> None:
+        """Type the compact command iff the newest context measurement of a
+        live Claude session exceeds the threshold and has not been acted on."""
+        threshold = self.auto_compact_threshold(channel_key)
+        if threshold <= 0:
+            return
+        state = self._sessions.get(channel_key)
+        # Only Claude transcripts expose per-call usage; codex/nessy have
+        # no comparable signal, so they keep manual /compact only.
+        if state is None or state.provider != "claude":
+            return
+        if not self._tmux_alive(state.session_name):
+            return
+        output_path = self._transcript_path_for_state(state)
+        if output_path is None:
+            return
+        usage = read_context_usage(output_path)
+        if usage is None or usage.tokens < threshold:
+            self._auto_compact_seen.pop(channel_key, None)
+            return
+        if self._auto_compact_seen.get(channel_key) == usage.line_id:
+            return  # already compacted on this measurement; waiting for a new turn
+        # Mark before sending: a modal-blocked send already posts its own
+        # alert, and retrying every tick would only spam it. The next
+        # assistant turn produces a new line_id and re-arms the check.
+        self._auto_compact_seen[channel_key] = usage.line_id
+        command = get_adapter(state.provider).compact_slash_command()
+        logger.info(
+            "TUI_IO: auto-compact session=%s tokens=%d threshold=%d",
+            state.session_name,
+            usage.tokens,
+            threshold,
+        )
+        delivered = await self.send_direct(channel_key, command, set_processing=False)
+        if not delivered:
+            return
+        bot = self._bot
+        if bot is None:
+            return
+        try:
+            await bot.send_message(  # type: ignore[attr-defined]
+                chat_id=channel_key[0],
+                text=t("ui.auto_compact_triggered", tokens=usage.tokens, threshold=threshold),
+                message_thread_id=channel_key[1],
+            )
+        except Exception:  # informational only — never fatal
+            logger.warning(
+                "TUI_IO: auto-compact notice failed session=%s",
+                state.session_name,
+                exc_info=True,
+            )
 
     def _spawn_tmux_sync(
         self,

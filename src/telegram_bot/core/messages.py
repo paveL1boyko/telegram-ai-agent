@@ -152,6 +152,27 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.compact_tmux_only": (
             "⚠️ /compact needs a live tmux session — switch /uimode to tmux first."
         ),
+        "ui.auto_compact_triggered": (
+            "🗜 Context {tokens:,} tokens > {threshold:,} — sending /compact automatically"
+        ),
+        "ui.auto_compact_status": (
+            "🗜 Auto-compact for this topic: <b>{threshold}</b> ({source})\n"
+            "Current context: <b>{tokens}</b>\n\n"
+            "<code>/autocompact 150000</code> — set threshold in tokens (k suffix ok: 150k)\n"
+            "<code>/autocompact off</code> — disable for this topic\n"
+            "<code>/autocompact default</code> — back to the bot default ({default})"
+        ),
+        "ui.auto_compact_set": "🗜 Auto-compact threshold for this topic: <b>{threshold}</b>",
+        "ui.auto_compact_off": "🗜 Auto-compact disabled for this topic",
+        "ui.auto_compact_default": "🗜 Auto-compact back to the bot default: <b>{threshold}</b>",
+        "ui.auto_compact_bad_value": (
+            "⚠️ Expected a token count (e.g. <code>220000</code> or <code>220k</code>),"
+            " <code>off</code> or <code>default</code>."
+        ),
+        "ui.auto_compact_source_override": "topic override",
+        "ui.auto_compact_source_default": "bot default",
+        "ui.auto_compact_disabled": "off",
+        "ui.auto_compact_unknown": "n/a",
         "ui.tmux_started_engine": "🖥 New tmux session started with {engine} — model: {model}",
         "ui.reply_engine_switched": (
             "↪️ Reply target belongs to {engine}; switching this topic before resume."
@@ -452,6 +473,27 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.compact_tmux_only": (
             "⚠️ /compact работает только с живой tmux-сессией — переключи /uimode в tmux."
         ),
+        "ui.auto_compact_triggered": (
+            "🗜 Контекст {tokens:,} токенов > {threshold:,} — отправляю /compact автоматически"
+        ),
+        "ui.auto_compact_status": (
+            "🗜 Авто-compact этого топика: <b>{threshold}</b> ({source})\n"
+            "Текущий контекст: <b>{tokens}</b>\n\n"
+            "<code>/autocompact 150000</code> — порог в токенах (можно с k: 150k)\n"
+            "<code>/autocompact off</code> — выключить для этого топика\n"
+            "<code>/autocompact default</code> — вернуть дефолт бота ({default})"
+        ),
+        "ui.auto_compact_set": "🗜 Порог авто-compact для этого топика: <b>{threshold}</b>",
+        "ui.auto_compact_off": "🗜 Авто-compact для этого топика выключен",
+        "ui.auto_compact_default": "🗜 Авто-compact снова по дефолту бота: <b>{threshold}</b>",
+        "ui.auto_compact_bad_value": (
+            "⚠️ Ожидаю число токенов (например <code>220000</code> или <code>220k</code>),"
+            " <code>off</code> или <code>default</code>."
+        ),
+        "ui.auto_compact_source_override": "настройка топика",
+        "ui.auto_compact_source_default": "дефолт бота",
+        "ui.auto_compact_disabled": "выкл",
+        "ui.auto_compact_unknown": "н/д",
         "ui.tmux_started_engine": "🖥 Создана новая tmux-сессия с {engine} — модель: {model}",
         "ui.reply_engine_switched": ("↪️ Ответ ведёт в {engine}; переключаю топик перед resume."),
         "ui.stream_mode_picker_caption": (

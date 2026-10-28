@@ -133,6 +133,10 @@ async def _start() -> None:
         )
     )
     tmux_manager.start_activity_watchdog()
+    tmux_manager.start_auto_compact_watchdog(
+        default_tokens=settings.auto_compact_tokens,
+        interval_sec=settings.auto_compact_check_sec,
+    )
     transcriber = Transcriber(settings)
     forward_batcher = ForwardBatcher(bot=bot)
 

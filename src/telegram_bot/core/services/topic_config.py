@@ -95,6 +95,9 @@ class TopicSettings:
     exec_mode: ExecMode = _DEFAULT_EXEC_MODE
     engine: Engine = _DEFAULT_ENGINE
     model: str | None = None
+    # Context-size threshold for the auto-compact watchdog; None → the bot
+    # default (`Settings.auto_compact_tokens`), 0 → off for this topic.
+    auto_compact_tokens: int | None = None
 
 
 def _default_topic() -> TopicSettings:
@@ -281,6 +284,21 @@ class TopicConfig:
                 if isinstance(raw_model, str) and raw_model.strip() and model is None:
                     logger.warning("Invalid model %r for topic %d, dropping", raw_model, thread_id)
 
+                raw_auto_compact = value.get("auto_compact_tokens")
+                auto_compact_tokens: int | None = None
+                if (
+                    isinstance(raw_auto_compact, int)
+                    and not isinstance(raw_auto_compact, bool)
+                    and raw_auto_compact >= 0
+                ):
+                    auto_compact_tokens = raw_auto_compact
+                elif raw_auto_compact is not None:
+                    logger.warning(
+                        "Invalid auto_compact_tokens %r for topic %d, dropping",
+                        raw_auto_compact,
+                        thread_id,
+                    )
+
                 topics[thread_id] = TopicSettings(
                     name=name,
                     type=topic_type,
@@ -291,6 +309,7 @@ class TopicConfig:
                     exec_mode=exec_mode,
                     engine=engine,
                     model=model,
+                    auto_compact_tokens=auto_compact_tokens,
                 )
 
         # Parse routing
@@ -442,6 +461,19 @@ class TopicConfig:
             field_name="cwd",
             value=cwd,
             log_label="update_cwd",
+        )
+
+    async def update_auto_compact_tokens(self, thread_id: int, tokens: int | None) -> bool:
+        """Persist the auto-compact threshold override for one topic
+        (None = bot default, 0 = off)."""
+        if tokens is not None and tokens < 0:
+            logger.warning("update_auto_compact_tokens: negative %r", tokens)
+            return False
+        return await self._update_topic_field(
+            thread_id=thread_id,
+            field_name="auto_compact_tokens",
+            value=tokens,
+            log_label="update_auto_compact_tokens",
         )
 
     async def update_exec_mode(self, thread_id: int, mode: str) -> bool:

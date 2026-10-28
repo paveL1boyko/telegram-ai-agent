@@ -354,6 +354,12 @@ Slash commands устроены отдельно: в tmux topics non-bot command
 - `/cancel`: отменить текущую обработку.
 - `/compact`: только tmux-режим; сжать контекст живой сессии, не теряя нить
   разговора.
+- `/autocompact`: показать или задать порог авто-compact для topic. Бот каждые
+  `AUTO_COMPACT_CHECK_SEC` (по умолчанию 300 с) читает размер контекста из
+  транскрипта живой Claude-сессии и сам отправляет `/compact`, когда размер
+  превышает порог (`AUTO_COMPACT_TOKENS`, по умолчанию 220000).
+  `/autocompact 150k` — override для topic, `/autocompact off` — выключить,
+  `/autocompact default` — вернуть дефолт бота.
 - `/language`: показать или сменить язык UI, например `/language ru`.
 - `/uimode`: только forum topics; выбрать `tmux` или `subprocess`. При
   переключении с `tmux` на `subprocess` активная tmux session останавливается.

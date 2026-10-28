@@ -41,6 +41,11 @@ PUBLIC_BOT_COMMANDS: tuple[LocalizedBotCommand, ...] = (
         "Сжать контекст текущей сессии",
         "Compact the current session context",
     ),
+    LocalizedBotCommand(
+        "autocompact",
+        "Авто-compact по размеру контекста",
+        "Auto-compact when the context grows too large",
+    ),
     LocalizedBotCommand("language", "Сменить язык интерфейса", "Change interface language"),
     LocalizedBotCommand(
         "uimode",

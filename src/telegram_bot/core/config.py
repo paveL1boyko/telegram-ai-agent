@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     # JSON list via AUTO_APPROVE_PERMISSION_TOOLS, e.g.
     # '["WebSearch", "WebFetch"]'.
     auto_approve_permission_tools: list[str] = []
+    # Automatic `/compact` for long-running tmux sessions. Every
+    # `auto_compact_check_sec` the bot reads the context size from the
+    # session transcript (sum of the input counters on the newest assistant
+    # line) and, once it exceeds `auto_compact_tokens`, types the engine's
+    # compact command into the pane and posts a notice. A 1M-token model can
+    # keep going far past the point where the context is all noise; the
+    # default keeps sessions around a fifth of that. 0 disables; per-topic
+    # override via `/autocompact <N>`.
+    auto_compact_tokens: int = 220_000
+    auto_compact_check_sec: float = 300.0
     # Rename forum topics to "<cwd folder> · <short model>" on /cwd and
     # model/engine switches, so the topic list shows where each session
     # runs. Requires the bot to have the manage_topics admin right; rename
