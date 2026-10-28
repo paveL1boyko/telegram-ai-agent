@@ -322,13 +322,19 @@ class TmuxManager:
         ) = None
         # Activity watchdog task — see start_activity_watchdog.
         self._activity_watchdog_task: asyncio.Task[None] | None = None
-        # Auto-compact watchdog — see start_auto_compact_watchdog. The map
+        # Auto-compact watchdog — see start_auto_compact_watchdog. `_seen`
         # remembers which transcript line triggered the last `/compact` per
-        # channel, so one oversized measurement cannot fire twice.
+        # channel, so one oversized measurement cannot fire twice;
+        # `_pending` holds (transcript offset, monotonic deadline) from the
+        # moment a `/compact` was typed until its compact_boundary lands —
+        # a busy session keeps producing new oversized lines every tick,
+        # and without this gate each tick would queue one more `/compact`
+        # behind the running turn.
         self._auto_compact_task: asyncio.Task[None] | None = None
         self._auto_compact_default_tokens = 0
         self._auto_compact_continue_prompt = ""
         self._auto_compact_seen: dict[ChannelKey, str] = {}
+        self._auto_compact_pending: dict[ChannelKey, tuple[int, float]] = {}
         # Strong refs to in-flight `_resume_after_compact` tasks (asyncio
         # keeps only weak refs to tasks).
         self._auto_compact_resume_tasks: set[asyncio.Task[None]] = set()
@@ -2659,12 +2665,22 @@ class TmuxManager:
         output_path = self._transcript_path_for_state(state)
         if output_path is None:
             return
+        if self._compact_still_pending(channel_key, output_path):
+            return
         usage = read_context_usage(output_path)
         if usage is None or usage.tokens < threshold:
             self._auto_compact_seen.pop(channel_key, None)
             return
         if self._auto_compact_seen.get(channel_key) == usage.line_id:
             return  # already compacted on this measurement; waiting for a new turn
+        pane = await capture_pane(state.session_name)
+        # A compaction someone else started (manual /compact, the Compact
+        # button) has no boundary yet, so the stale pre-compact line is
+        # still the newest measurement. Wait for it to finish instead of
+        # queueing a second compaction behind it; `_seen` stays untouched
+        # so the next tick re-evaluates against the boundary's postTokens.
+        if "compacting" in pane.lower():
+            return
         # Mark before sending: a modal-blocked send already posts its own
         # alert, and retrying every tick would only spam it. The next
         # assistant turn produces a new line_id and re-arms the check.
@@ -2675,7 +2691,6 @@ class TmuxManager:
         # the turn ends, leaving the task half-done at an idle prompt. An
         # idle session has nothing to resume — a "continue" there would
         # just buy a pointless turn.
-        pane = await capture_pane(state.session_name)
         busy = self.is_processing(channel_key) or "esc to interrupt" in pane.lower()
         try:
             offset_before = output_path.stat().st_size
@@ -2691,6 +2706,10 @@ class TmuxManager:
         delivered = await self.send_direct(channel_key, command, set_processing=False)
         if not delivered:
             return
+        self._auto_compact_pending[channel_key] = (
+            offset_before,
+            time.monotonic() + _AUTO_COMPACT_RESUME_DEADLINE_SEC,
+        )
         await self._post_plain_notice(
             channel_key,
             state,
@@ -2702,6 +2721,18 @@ class TmuxManager:
             )
             self._auto_compact_resume_tasks.add(task)
             task.add_done_callback(self._auto_compact_resume_tasks.discard)
+
+    def _compact_still_pending(self, channel_key: ChannelKey, output_path: Path) -> bool:
+        """True while a `/compact` typed earlier has neither produced its
+        compact_boundary nor timed out. Clears the gate otherwise."""
+        pending = self._auto_compact_pending.get(channel_key)
+        if pending is None:
+            return False
+        offset, deadline = pending
+        if time.monotonic() >= deadline or compact_boundary_since(output_path, offset):
+            del self._auto_compact_pending[channel_key]
+            return False
+        return True
 
     async def _resume_after_compact(
         self,

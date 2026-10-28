@@ -186,13 +186,64 @@ async def test_compacts_once_when_over_default_threshold(tmp_path: Path, monkeyp
 
     assert sent == [(key, "/compact", False)]
 
-    # A new assistant turn that is still oversized re-arms the check.
+    # Still oversized lines keep arriving while the queued /compact waits
+    # for the turn to end — they must not queue more compactions.
     with transcript.open("a") as fh:
         fh.write(_assistant_line("a2", cached=240_000) + "\n")
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
+    assert len(sent) == 1
+
+    # Once the compaction lands, a fresh oversized turn re-arms the check.
+    with transcript.open("a") as fh:
+        fh.write(COMPACT_BOUNDARY_LINE + "\n")
+        fh.write(_assistant_line("a3", cached=240_000) + "\n")
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
     assert len(sent) == 2
     assert mgr._auto_compact_resume_tasks == set()  # idle session: nothing to resume
+
+
+async def test_pending_gate_expires_after_deadline(tmp_path: Path, monkeypatch) -> None:
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, transcript, sent = _wire(
+        mgr, tmp_path, [_assistant_line("a1", cached=230_000)], monkeypatch=monkeypatch
+    )
+    monkeypatch.setattr(tmux_manager_module, "_AUTO_COMPACT_RESUME_DEADLINE_SEC", -1)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+        with transcript.open("a") as fh:
+            fh.write(_assistant_line("a2", cached=240_000) + "\n")
+        await mgr._check_channel_context(key)
+    assert len(sent) == 2
+
+
+async def test_compaction_in_flight_in_pane_is_not_doubled(tmp_path: Path, monkeypatch) -> None:
+    """Manual /compact already running (pane shows Compacting…): the stale
+    pre-compact measurement must not trigger a second one."""
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, _transcript, sent = _wire(
+        mgr,
+        tmp_path,
+        [_assistant_line("a1", cached=230_000)],
+        pane="✻ Compacting conversation… (esc to interrupt)\n",
+        monkeypatch=monkeypatch,
+    )
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert sent == []
+    assert key not in mgr._auto_compact_seen
+
+
+def test_compact_boundary_supersedes_stale_usage(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        _assistant_line("a1", cached=230_000) + "\n" + COMPACT_BOUNDARY_LINE + "\n"
+    )
+    usage = read_context_usage(transcript)
+    assert usage is not None
+    assert usage.tokens == 12_000
+    assert usage.line_id.startswith("boundary:")
 
 
 async def test_under_threshold_does_nothing(tmp_path: Path, monkeypatch) -> None:

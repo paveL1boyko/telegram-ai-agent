@@ -39,7 +39,16 @@ class ContextUsage:
 
 def read_context_usage(transcript: Path) -> ContextUsage | None:
     """Return the context size reported by the newest assistant line, or
-    None when the transcript is missing, unreadable, or has no usage yet."""
+    None when the transcript is missing, unreadable, or has no usage yet.
+
+    A `compact_boundary` written after that line supersedes it: the
+    window has just been rebuilt from the summary and the next assistant
+    call is what will reveal the real size. Until then the boundary's own
+    `postTokens` is reported (0 when absent), keyed by the boundary line —
+    otherwise the stale pre-compact number would keep tripping the
+    watchdog and queue a second `/compact` on an already-compacted
+    session (seen live 2026-10-29: two back-to-back 2-minute compactions).
+    """
     try:
         size = transcript.stat().st_size
         with transcript.open("rb") as fh:
@@ -50,6 +59,10 @@ def read_context_usage(transcript: Path) -> ContextUsage | None:
     except OSError:
         return None
     for raw in reversed(tail.splitlines()):
+        if _COMPACT_BOUNDARY in raw:
+            boundary = _parse_compact_boundary(raw)
+            if boundary is not None:
+                return boundary
         if b'"usage"' not in raw or b'"assistant"' not in raw:
             continue
         try:
@@ -78,6 +91,22 @@ def read_context_usage(transcript: Path) -> ContextUsage | None:
 
 _COMPACT_BOUNDARY = b'"compact_boundary"'
 _SCAN_CHUNK = 256 * 1024
+
+
+def _parse_compact_boundary(raw: bytes) -> ContextUsage | None:
+    try:
+        entry = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(entry, dict) or entry.get("subtype") != "compact_boundary":
+        return None
+    meta = entry.get("compactMetadata")
+    post = meta.get("postTokens") if isinstance(meta, dict) else None
+    tokens = post if isinstance(post, int) and not isinstance(post, bool) else 0
+    line_id = entry.get("uuid")
+    if not isinstance(line_id, str) or not line_id:
+        line_id = f"boundary:{entry.get('timestamp') or tokens}"
+    return ContextUsage(tokens=max(0, tokens), line_id=line_id)
 
 
 def compact_boundary_since(transcript: Path, offset: int) -> bool:
