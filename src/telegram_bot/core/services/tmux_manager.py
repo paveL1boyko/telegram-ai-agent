@@ -1075,8 +1075,25 @@ class TmuxManager:
 
         # Step 1 — pre-send modal check. A modal here means Claude is
         # waiting on a dialog (model picker, /usage, trust, auto-compact);
-        # pasting+Enter would silently confirm a menu item.
+        # pasting+Enter would silently confirm a menu item. An allowlisted
+        # tool-permission dialog is answered first: the watchdog skips a
+        # channel while its send lock is held, so without this a message
+        # typed while CC asks about WebSearch turned into a manual alert
+        # instead of the auto-approval the operator configured
+        # (2026-10-28).
         pane_before = await capture_pane(session_name)
+        tool = self._auto_approvable_tool(state, pane_before)
+        if tool is not None:
+            if await self._auto_approve_permission(channel_key, state, tool) == "failed":
+                await self._send_modal_alert(
+                    channel_key,
+                    state,
+                    prompt,
+                    pane_before,
+                    reason="claude_modal_before_send",
+                )
+                return False
+            pane_before = await capture_pane(session_name)
         if is_modal_present(pane_before):
             await self._send_modal_alert(
                 channel_key,
@@ -1088,41 +1105,53 @@ class TmuxManager:
             return False
 
         # Step 2 — bracketed paste, no Enter yet.
-        try:
-            await send_text_to_tmux(session_name, prompt, submit_enter=False)
-        except (OSError, subprocess.SubprocessError):
-            logger.warning(
-                "TUI_IO: send_with_modal_guard send_text failed session=%s",
-                session_name,
-                exc_info=True,
-            )
-            await self._send_modal_alert(
-                channel_key,
-                state,
-                prompt,
-                pane_before,
-                reason="claude_send_error",
-            )
-            return False
-
         # Step 3 — settle. Bracketed paste arrives as a single event but
         # the TUI needs a frame to absorb it; without this Enter races the
         # paste. Long/multiline payloads need more time to render the
         # `[Pasted text #N]` chip / wrapped lines.
+        # Step 4 — post-paste modal check. Closes the race where a modal
+        # popped between the pre-check and now (auto-compact prompt, MCP
+        # auth, idle hooks). Cleanup with Ctrl+U so the orphaned paste
+        # does not stack onto the next message's input bar — that was the
+        # 2026-05-07 incident class. If that modal is an allowlisted
+        # permission dialog it is approved and the paste repeated once —
+        # the text landed while the dialog owned the keyboard and cannot
+        # be trusted to sit in the input box.
         settle = (
             _GUARD_SETTLE_LONG_SEC
             if len(prompt) > _GUARD_LONG_PROMPT_THRESHOLD or "\n" in prompt
             else _GUARD_SETTLE_SHORT_SEC
         )
-        await asyncio.sleep(settle)
+        pane_after_paste = pane_before
+        for paste_attempt in range(2):
+            try:
+                await send_text_to_tmux(session_name, prompt, submit_enter=False)
+            except (OSError, subprocess.SubprocessError):
+                logger.warning(
+                    "TUI_IO: send_with_modal_guard send_text failed session=%s",
+                    session_name,
+                    exc_info=True,
+                )
+                await self._send_modal_alert(
+                    channel_key,
+                    state,
+                    prompt,
+                    pane_before,
+                    reason="claude_send_error",
+                )
+                return False
 
-        # Step 4 — post-paste modal check. Closes the race where a modal
-        # popped between the pre-check and now (auto-compact prompt, MCP
-        # auth, idle hooks). Cleanup with Ctrl+U so the orphaned paste
-        # does not stack onto the next message's input bar — that was the
-        # 2026-05-07 incident class.
-        pane_after_paste = await capture_pane(session_name)
-        if is_modal_present(pane_after_paste):
+            await asyncio.sleep(settle)
+
+            pane_after_paste = await capture_pane(session_name)
+            if not is_modal_present(pane_after_paste):
+                break
+            tool = self._auto_approvable_tool(state, pane_after_paste)
+            approved = (
+                paste_attempt == 0
+                and tool is not None
+                and await self._auto_approve_permission(channel_key, state, tool) != "failed"
+            )
             try:
                 await send_ctrl_u(session_name)
             except (OSError, subprocess.SubprocessError):
@@ -1133,6 +1162,12 @@ class TmuxManager:
                     session_name,
                     exc_info=True,
                 )
+            if approved:
+                logger.info(
+                    "TUI_IO: send_with_modal_guard re-paste after permission approval session=%s",
+                    session_name,
+                )
+                continue
             await self._send_modal_alert(
                 channel_key,
                 state,

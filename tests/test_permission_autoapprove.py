@@ -10,7 +10,11 @@ Covers the two layers of the feature:
 2. the TmuxManager watchdog hook — Enter on the verified dialog for
    operator-allowlisted tools only, with re-capture guards on both sides
    of the keypress, bounded retries when an Enter is swallowed mid-render,
-   and fall-through to the manual idle alert on failure.
+   and fall-through to the manual idle alert on failure;
+3. the same approval inside the user-send pipeline
+   (`_send_with_modal_guard`) — the watchdog skips a channel while its
+   send lock is held, so a message typed while the dialog is up used to
+   turn into a manual "modal before send" alert (2026-10-28).
 """
 
 from __future__ import annotations
@@ -401,3 +405,86 @@ def test_dialog_switched_between_ticks_not_touched(tmp_path: Path, monkeypatch) 
 
     assert calls["enter"] == []
     assert alerts == [WEBSEARCH_DIALOG]
+
+
+# --- send pipeline: approval instead of "modal before send" ------------------
+
+
+def _patch_send_pipeline(monkeypatch, manager: TmuxManager, panes: list[str]) -> dict[str, list]:
+    """Fake every tmux I/O of `_send_with_modal_guard` + record alerts."""
+    calls = _patch_io(monkeypatch, panes)
+    calls["paste"] = []
+    calls["ctrl_u"] = []
+    calls["alerts"] = []
+
+    async def fake_paste(session_name: str, text: str, *, submit_enter: bool = True) -> None:
+        calls["paste"].append(text)
+
+    async def fake_ctrl_u(session_name: str) -> None:
+        calls["ctrl_u"].append(session_name)
+
+    async def fake_alert(channel_key, state, prompt, pane, *, reason):  # type: ignore[no-untyped-def]
+        calls["alerts"].append(reason)
+
+    monkeypatch.setattr(tmux_manager_module, "send_text_to_tmux", fake_paste)
+    monkeypatch.setattr(tmux_manager_module, "send_ctrl_u", fake_ctrl_u)
+    monkeypatch.setattr(tmux_manager_module, "_GUARD_SETTLE_SHORT_SEC", 0)
+    monkeypatch.setattr(tmux_manager_module, "_GUARD_SETTLE_LONG_SEC", 0)
+    monkeypatch.setattr(manager, "_send_modal_alert", fake_alert)
+    return calls
+
+
+def test_send_approves_allowlisted_dialog_before_paste(tmp_path: Path, monkeypatch) -> None:
+    """The 2026-10-28 incident: user message arrives while CC shows the
+    WebSearch dialog. Expected: Enter on the dialog, then the normal
+    paste + Enter of the message — no alert."""
+    manager, state = _make_manager(tmp_path, tools=["WebSearch"])
+    # pre-send capture → verify capture → post-Enter capture (dialog gone)
+    # → re-capture pre-send → post-paste capture.
+    calls = _patch_send_pipeline(
+        monkeypatch,
+        manager,
+        [WEBSEARCH_DIALOG, WEBSEARCH_DIALOG, IDLE_PANE, IDLE_PANE, IDLE_PANE],
+    )
+
+    ok = asyncio.run(manager._send_with_modal_guard((1, 2), state, "hello"))
+
+    assert ok is True
+    assert calls["paste"] == ["hello"]
+    # One Enter for the dialog, one for the message.
+    assert calls["enter"] == ["cc-1-2", "cc-1-2"]
+    assert calls["alerts"] == []
+
+
+def test_send_still_alerts_on_non_allowlisted_dialog(tmp_path: Path, monkeypatch) -> None:
+    manager, state = _make_manager(tmp_path, tools=["WebSearch"])
+    calls = _patch_send_pipeline(monkeypatch, manager, [BASH_DIALOG])
+
+    ok = asyncio.run(manager._send_with_modal_guard((1, 2), state, "hello"))
+
+    assert ok is False
+    assert calls["paste"] == []
+    assert calls["enter"] == []
+    assert calls["alerts"] == ["claude_modal_before_send"]
+
+
+def test_send_repastes_when_dialog_pops_after_paste(tmp_path: Path, monkeypatch) -> None:
+    """Dialog appears between the pre-check and the post-paste check: the
+    paste is cleared (C-u), the dialog approved, and the message pasted
+    again before Enter."""
+    manager, state = _make_manager(tmp_path, tools=["WebSearch"])
+    # pre-send (idle) → post-paste (dialog) → verify (dialog) → post-Enter
+    # (idle) → post-second-paste (idle).
+    calls = _patch_send_pipeline(
+        monkeypatch,
+        manager,
+        [IDLE_PANE, WEBSEARCH_DIALOG, WEBSEARCH_DIALOG, IDLE_PANE, IDLE_PANE],
+    )
+
+    ok = asyncio.run(manager._send_with_modal_guard((1, 2), state, "hello"))
+
+    assert ok is True
+    assert calls["paste"] == ["hello", "hello"]
+    assert calls["ctrl_u"] == ["cc-1-2"]
+    assert calls["enter"] == ["cc-1-2", "cc-1-2"]
+    assert calls["alerts"] == []
