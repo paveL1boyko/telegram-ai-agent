@@ -322,6 +322,26 @@ async def handle_compact_command(
     "Compacting…" / "Compacted N → M tokens" feedback comes back through the
     transcript tail.
     """
+    await _compact_session(message, message_queue, tmux_manager, topic_config)
+
+
+@router.message(F.text == t("ui.btn_compact"))
+async def handle_compact_button(
+    message: Message,
+    message_queue: MessageQueue,
+    tmux_manager: TmuxManager,
+    topic_config: TopicConfig,
+) -> None:
+    """Reply-keyboard Compact button — same as /compact."""
+    await _compact_session(message, message_queue, tmux_manager, topic_config)
+
+
+async def _compact_session(
+    message: Message,
+    message_queue: MessageQueue,
+    tmux_manager: TmuxManager,
+    topic_config: TopicConfig,
+) -> None:
     key = channel_key(message)
     settings = topic_config.get_topic(key[1])
     if settings.exec_mode != "tmux":
@@ -1495,6 +1515,64 @@ async def on_cwd_cancel(callback: CallbackQuery, cwd_picker_store: CwdPickerStor
     await _answer_callback_safely(callback, t("ui.cwd_picker_cancelled"))
 
 
+async def _show_cwd_picker(
+    message: Message,
+    thread_id: int,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    cwd_picker_store: CwdPickerStore,
+) -> None:
+    """Post the folder picker for the topic's cwd — bare `/cwd` and the
+    reply-keyboard cwd button share this."""
+    topic = topic_config.get_topic(thread_id)
+    runtime = resolve_topic_runtime_config(topic, bot_defaults)
+    source = t("ui.cwd_source_override") if topic.cwd else t("ui.cwd_source_default")
+    parent = runtime.cwd.parent
+    dirs = await asyncio.to_thread(list_subdirs, parent)
+    if not dirs:
+        await message.answer(
+            t("ui.cwd_current", cwd=html.escape(str(runtime.cwd)), source=source)
+            + "\n"
+            + t("ui.cwd_picker_empty", parent=html.escape(str(parent))),
+            parse_mode="HTML",
+        )
+        return
+    token = cwd_picker_store.put(
+        CwdPickerState(
+            chat_id=message.chat.id,
+            thread_id=thread_id,
+            list_dir=parent,
+            created_at=time.time(),
+        )
+    )
+    await message.answer(
+        _cwd_picker_caption(runtime.cwd, parent, source),
+        reply_markup=cwd_keyboard(
+            dirs,
+            page=0,
+            list_dir=parent,
+            current_cwd=runtime.cwd,
+            token=token,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == t("ui.btn_cwd"))
+async def handle_cwd_button(
+    message: Message,
+    topic_config: TopicConfig,
+    bot_defaults: BotDefaults,
+    cwd_picker_store: CwdPickerStore,
+) -> None:
+    """Reply-keyboard cwd button — same as bare /cwd."""
+    _, thread_id = channel_key(message)
+    if thread_id is None:
+        await message.answer(t("ui.cwd_not_in_forum"))
+        return
+    await _show_cwd_picker(message, thread_id, topic_config, bot_defaults, cwd_picker_store)
+
+
 @router.message(Command("cwd", "set_pwd"))
 async def handle_cwd_command(
     message: Message,
@@ -1523,41 +1601,10 @@ async def handle_cwd_command(
         await message.answer(t("ui.cwd_not_in_forum"))
         return
 
-    topic = topic_config.get_topic(thread_id)
-    runtime = resolve_topic_runtime_config(topic, bot_defaults)
-    source = t("ui.cwd_source_override") if topic.cwd else t("ui.cwd_source_default")
     arg = (command.args or "").strip()
 
     if not arg:
-        parent = runtime.cwd.parent
-        dirs = await asyncio.to_thread(list_subdirs, parent)
-        if not dirs:
-            await message.answer(
-                t("ui.cwd_current", cwd=html.escape(str(runtime.cwd)), source=source)
-                + "\n"
-                + t("ui.cwd_picker_empty", parent=html.escape(str(parent))),
-                parse_mode="HTML",
-            )
-            return
-        token = cwd_picker_store.put(
-            CwdPickerState(
-                chat_id=message.chat.id,
-                thread_id=thread_id,
-                list_dir=parent,
-                created_at=time.time(),
-            )
-        )
-        await message.answer(
-            _cwd_picker_caption(runtime.cwd, parent, source),
-            reply_markup=cwd_keyboard(
-                dirs,
-                page=0,
-                list_dir=parent,
-                current_cwd=runtime.cwd,
-                token=token,
-            ),
-            parse_mode="HTML",
-        )
+        await _show_cwd_picker(message, thread_id, topic_config, bot_defaults, cwd_picker_store)
         return
 
     if arg.lower() == "default":

@@ -21,12 +21,11 @@ CWD_PAGE_SIZE = 8
 
 
 def topic_keyboard() -> ReplyKeyboardMarkup:
-    """Reply keyboard with new chat, cancel, and a TUI-snapshot shortcut.
-    The TUI button sends the i18n text `t("ui.btn_tui")` (e.g. "TUI 🖥");
-    `handle_tui_button` in `handlers/tail.py` listens for that exact text
-    and forwards to `handle_tail_command`, so the user gets the same
-    `/tui` snapshot with one keyboard tap instead of typing the slash
-    command."""
+    """Reply keyboard with new chat, cancel, model/TUI and compact/cwd shortcuts.
+    Each button sends its i18n text (e.g. `t("ui.btn_tui")` → "TUI 🖥"); a
+    `F.text == t("ui.btn_*")` handler listens for that exact text and runs
+    the matching slash command (`/tui`, `/model`, `/compact`, bare `/cwd`),
+    so the user gets the same result with one keyboard tap."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -36,6 +35,10 @@ def topic_keyboard() -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text=t("ui.btn_model")),
                 KeyboardButton(text=t("ui.btn_tui")),
+            ],
+            [
+                KeyboardButton(text=t("ui.btn_compact")),
+                KeyboardButton(text=t("ui.btn_cwd")),
             ],
         ],
         is_persistent=True,

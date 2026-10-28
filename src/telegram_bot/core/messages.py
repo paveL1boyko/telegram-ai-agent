@@ -238,6 +238,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.btn_cancel": "Cancel ❌",
         "ui.btn_tui": "TUI 🖥",
         "ui.btn_model": "Model 🤖",
+        "ui.btn_compact": "Compact 🗜",
+        "ui.btn_cwd": "cwd 📁",
         # --- CC content prefixes (injected into prompts) --------------
         "cc.voice_transcript_short": "[Voice, transcription]:",
         "cc.voice_failed_full": "[Voice message: failed to transcribe]",
@@ -534,6 +536,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.btn_cancel": "Отменить ❌",
         "ui.btn_tui": "TUI 🖥",
         "ui.btn_model": "Модель 🤖",
+        "ui.btn_compact": "Compact 🗜",
+        "ui.btn_cwd": "cwd 📁",
         # CC content prefixes are intentionally English-only — see MESSAGES["en"].
         # --- Queue messages -------------------------------------------
         "ui.queue_added_batch": "Добавлено в батч, он №{position} в очереди",
