@@ -132,7 +132,7 @@ from telegram_bot.core.services.topic_runtime import (
     resolve_topic_runtime_config,
 )
 from telegram_bot.core.tui.capture import await_prompt_ready
-from telegram_bot.core.tui.context_usage import read_context_usage
+from telegram_bot.core.tui.context_usage import compact_boundary_since, read_context_usage
 from telegram_bot.core.tui.modal_detect import (
     capture_pane,
     claude_input_bar_content,
@@ -186,6 +186,15 @@ _PERMISSION_RESOLVE_WAIT_SEC = 0.7
 # a fresh capture before pressing again, so the safety invariant (Enter
 # only into a structurally verified dialog) holds on every attempt.
 _PERMISSION_ENTER_ATTEMPTS = 3
+
+# Auto-compact resume (`_resume_after_compact`): how often to look for the
+# compact_boundary line, how long to keep looking, and how long to let CC
+# redraw its prompt after the boundary before pasting the continue prompt.
+# The deadline is long because a `/compact` typed into a busy session is
+# queued behind the running turn, which can itself take many minutes.
+_AUTO_COMPACT_RESUME_POLL_SEC = 5.0
+_AUTO_COMPACT_RESUME_DEADLINE_SEC = 30 * 60
+_AUTO_COMPACT_RESUME_SETTLE_SEC = 3.0
 
 # How often the activity watchdog stats each session's transcript for growth
 # beyond the delivered offset. 10s keeps tmux-typed turns near-realtime in
@@ -318,7 +327,11 @@ class TmuxManager:
         # channel, so one oversized measurement cannot fire twice.
         self._auto_compact_task: asyncio.Task[None] | None = None
         self._auto_compact_default_tokens = 0
+        self._auto_compact_continue_prompt = ""
         self._auto_compact_seen: dict[ChannelKey, str] = {}
+        # Strong refs to in-flight `_resume_after_compact` tasks (asyncio
+        # keeps only weak refs to tasks).
+        self._auto_compact_resume_tasks: set[asyncio.Task[None]] = set()
         # Per-channel lock around send_direct's capture→send-keys→verify→Enter
         # sequence. Without it, two overlapping user messages race on shared
         # pane state.
@@ -2577,7 +2590,9 @@ class TmuxManager:
 
     # --- Auto-compact watchdog ---
 
-    def start_auto_compact_watchdog(self, *, default_tokens: int, interval_sec: float) -> None:
+    def start_auto_compact_watchdog(
+        self, *, default_tokens: int, interval_sec: float, continue_prompt: str = ""
+    ) -> None:
         """Launch the background task that compacts oversized sessions.
 
         Every `interval_sec` each live Claude session's transcript is read
@@ -2585,10 +2600,13 @@ class TmuxManager:
         exceeds the topic's threshold (`TopicSettings.auto_compact_tokens`,
         falling back to `default_tokens`), the engine's compact command is
         typed into the pane exactly as a user `/compact` would be and a
-        notice is posted. `default_tokens=0` with no topic overrides makes
-        the loop a no-op. Idempotent.
+        notice is posted. If the session was mid-task at that moment,
+        `continue_prompt` is sent once the compaction lands (see
+        `_resume_after_compact`). `default_tokens=0` with no topic
+        overrides makes the loop a no-op. Idempotent.
         """
         self._auto_compact_default_tokens = max(0, default_tokens)
+        self._auto_compact_continue_prompt = continue_prompt.strip()
         if self._auto_compact_task is not None:
             return
         self._auto_compact_task = asyncio.create_task(self._auto_compact_loop(interval_sec))
@@ -2652,28 +2670,98 @@ class TmuxManager:
         # assistant turn produces a new line_id and re-arms the check.
         self._auto_compact_seen[channel_key] = usage.line_id
         command = get_adapter(state.provider).compact_slash_command()
+        # Busy-at-trigger decides whether to resume afterwards: a compact
+        # typed into a working session is queued by CC and executed when
+        # the turn ends, leaving the task half-done at an idle prompt. An
+        # idle session has nothing to resume — a "continue" there would
+        # just buy a pointless turn.
+        pane = await capture_pane(state.session_name)
+        busy = self.is_processing(channel_key) or "esc to interrupt" in pane.lower()
+        try:
+            offset_before = output_path.stat().st_size
+        except OSError:
+            offset_before = 0
         logger.info(
-            "TUI_IO: auto-compact session=%s tokens=%d threshold=%d",
+            "TUI_IO: auto-compact session=%s tokens=%d threshold=%d busy=%s",
             state.session_name,
             usage.tokens,
             threshold,
+            busy,
         )
         delivered = await self.send_direct(channel_key, command, set_processing=False)
         if not delivered:
             return
+        await self._post_plain_notice(
+            channel_key,
+            state,
+            t("ui.auto_compact_triggered", tokens=usage.tokens, threshold=threshold),
+        )
+        if busy and self._auto_compact_continue_prompt:
+            task = asyncio.create_task(
+                self._resume_after_compact(channel_key, state, output_path, offset_before)
+            )
+            self._auto_compact_resume_tasks.add(task)
+            task.add_done_callback(self._auto_compact_resume_tasks.discard)
+
+    async def _resume_after_compact(
+        self,
+        channel_key: ChannelKey,
+        state: TmuxSessionState,
+        output_path: Path,
+        offset_before: int,
+    ) -> None:
+        """Wait for the `/compact` typed by the watchdog to finish, then
+        send the continue prompt so the interrupted task picks up again.
+
+        Completion is read from the transcript (a `compact_boundary` line
+        appended after `offset_before`) rather than the pane: the pane
+        shows "Compacting…" only briefly and the queued `/compact` may not
+        even start until the current turn ends, which can take a long
+        time — hence the generous deadline. Gives up silently when the
+        session is replaced (`/new`, `/cwd`) or dies in the meantime.
+        """
+        deadline = time.monotonic() + _AUTO_COMPACT_RESUME_DEADLINE_SEC
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_AUTO_COMPACT_RESUME_POLL_SEC)
+            if self._sessions.get(channel_key) is not state:
+                return
+            if not self._tmux_alive(state.session_name):
+                return
+            if compact_boundary_since(output_path, offset_before):
+                break
+        else:
+            logger.info(
+                "TUI_IO: auto-compact resume gave up session=%s (no compact_boundary)",
+                state.session_name,
+            )
+            return
+        # Let CC redraw the prompt after the boundary is written.
+        await asyncio.sleep(_AUTO_COMPACT_RESUME_SETTLE_SEC)
+        if self._sessions.get(channel_key) is not state:
+            return
+        logger.info("TUI_IO: auto-compact resume session=%s", state.session_name)
+        delivered = await self.send_direct(channel_key, self._auto_compact_continue_prompt)
+        if delivered:
+            await self._post_plain_notice(channel_key, state, t("ui.auto_compact_resumed"))
+
+    async def _post_plain_notice(
+        self, channel_key: ChannelKey, state: TmuxSessionState, text: str
+    ) -> None:
+        """Informational chat line from a background task — never fatal."""
         bot = self._bot
         if bot is None:
             return
         try:
             await bot.send_message(  # type: ignore[attr-defined]
                 chat_id=channel_key[0],
-                text=t("ui.auto_compact_triggered", tokens=usage.tokens, threshold=threshold),
+                text=text,
                 message_thread_id=channel_key[1],
             )
-        except Exception:  # informational only — never fatal
+        except Exception:
             logger.warning(
-                "TUI_IO: auto-compact notice failed session=%s",
+                "TUI_IO: notice failed session=%s text=%r",
                 state.session_name,
+                text[:60],
                 exc_info=True,
             )
 

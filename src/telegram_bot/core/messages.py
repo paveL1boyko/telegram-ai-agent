@@ -155,6 +155,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.auto_compact_triggered": (
             "🗜 Context {tokens:,} tokens > {threshold:,} — sending /compact automatically"
         ),
+        "ui.auto_compact_resumed": "▶️ Compaction done — resuming the interrupted task",
         "ui.auto_compact_status": (
             "🗜 Auto-compact for this topic: <b>{threshold}</b> ({source})\n"
             "Current context: <b>{tokens}</b>\n\n"
@@ -476,6 +477,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.auto_compact_triggered": (
             "🗜 Контекст {tokens:,} токенов > {threshold:,} — отправляю /compact автоматически"
         ),
+        "ui.auto_compact_resumed": "▶️ Контекст сжат — продолжаю прерванную задачу",
         "ui.auto_compact_status": (
             "🗜 Авто-compact этого топика: <b>{threshold}</b> ({source})\n"
             "Текущий контекст: <b>{tokens}</b>\n\n"

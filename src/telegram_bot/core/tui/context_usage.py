@@ -74,3 +74,26 @@ def read_context_usage(transcript: Path) -> ContextUsage | None:
             line_id = str(entry.get("timestamp") or tokens)
         return ContextUsage(tokens=tokens, line_id=line_id)
     return None
+
+
+_COMPACT_BOUNDARY = b'"compact_boundary"'
+_SCAN_CHUNK = 256 * 1024
+
+
+def compact_boundary_since(transcript: Path, offset: int) -> bool:
+    """True when a `compact_boundary` system line was appended after byte
+    `offset` — how the auto-compact watchdog learns that the `/compact` it
+    typed has finished (CC writes the boundary once the summary is in)."""
+    try:
+        with transcript.open("rb") as fh:
+            fh.seek(max(0, offset))
+            carry = b""
+            while True:
+                chunk = fh.read(_SCAN_CHUNK)
+                if not chunk:
+                    return False
+                if _COMPACT_BOUNDARY in carry + chunk:
+                    return True
+                carry = chunk[-len(_COMPACT_BOUNDARY) :]
+    except OSError:
+        return False

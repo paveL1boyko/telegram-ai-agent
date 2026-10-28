@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # override via `/autocompact <N>`.
     auto_compact_tokens: int = 220_000
     auto_compact_check_sec: float = 300.0
+    # After an automatic `/compact` the CLI idles at the prompt, so a task
+    # that was running when the compaction fired would stall. When the
+    # session was busy at trigger time the bot waits for the compaction to
+    # finish and sends this prompt to resume the work. Empty = never resume.
+    auto_compact_continue_prompt: str = "continue"
     # Rename forum topics to "<cwd folder> · <short model>" on /cwd and
     # model/engine switches, so the topic list shows where each session
     # runs. Requires the bot to have the manage_topics admin right; rename

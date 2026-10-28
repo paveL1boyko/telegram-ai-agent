@@ -359,7 +359,10 @@ Slash commands устроены отдельно: в tmux topics non-bot command
   транскрипта живой Claude-сессии и сам отправляет `/compact`, когда размер
   превышает порог (`AUTO_COMPACT_TOKENS`, по умолчанию 220000).
   `/autocompact 150k` — override для topic, `/autocompact off` — выключить,
-  `/autocompact default` — вернуть дефолт бота.
+  `/autocompact default` — вернуть дефолт бота. Если в момент авто-`/compact`
+  сессия была занята задачей, после сжатия бот отправляет
+  `AUTO_COMPACT_CONTINUE_PROMPT` (по умолчанию `continue`), чтобы длинная
+  задача продолжилась, а не зависла на пустом промпте.
 - `/language`: показать или сменить язык UI, например `/language ru`.
 - `/uimode`: только forum topics; выбрать `tmux` или `subprocess`. При
   переключении с `tmux` на `subprocess` активная tmux session останавливается.
