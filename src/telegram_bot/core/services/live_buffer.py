@@ -101,6 +101,27 @@ class LiveStatusBuffer:
         """All pages posted by this buffer (for reply-to-resume recording)."""
         return list(self._message_ids)
 
+    @property
+    def has_lines(self) -> bool:
+        """True once at least one status line has been appended."""
+        return bool(self._lines)
+
+    async def finalize(self, text: str) -> bool:
+        """Turn an untouched placeholder into the turn-completion marker.
+
+        A pure-text turn (no tool calls) never appends a line, so the
+        placeholder would otherwise hang as "Thinking..." above the finished
+        answer — reading as a stuck stream. Returns True iff the buffer had
+        no lines and its message was edited to `text`; the caller then skips
+        sending the marker as a separate message. A buffer with status
+        history keeps its page untouched and gets the marker separately.
+        """
+        if self._closed or self._lines:
+            return False
+        await self.close()  # stops the worker first, so it can't re-edit after us
+        await self._edit(self._current_message_id, text)
+        return True
+
     async def append(self, line: str) -> None:
         """Record a status line. Never awaits Telegram — the worker does that."""
         if self._closed or not line:

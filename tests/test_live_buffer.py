@@ -81,3 +81,63 @@ def test_continuation_header_replaces_header_text() -> None:
 def test_empty_buffer_renders_header_only() -> None:
     assert _rendered([], header_text="⏳ Думаю…") == "⏳ Думаю…\n"
     assert _rendered([]) == ""
+
+
+# --- finalize (empty placeholder → completion marker) -----------------------
+
+
+class _RecordingBot:
+    def __init__(self) -> None:
+        self.edits: list[tuple[int, str]] = []
+
+    async def edit_message_text(self, *, text: str, message_id: int, **kwargs: object) -> None:
+        self.edits.append((message_id, text))
+
+
+def _make_buffer(bot: _RecordingBot, *, header_text: str = "⏳ Думаю…") -> LiveStatusBuffer:
+    return LiveStatusBuffer(
+        bot=bot,  # type: ignore[arg-type]
+        chat_id=1,
+        thread_id=None,
+        initial_message_id=42,
+        header_text=header_text,
+    )
+
+
+def test_finalize_turns_empty_placeholder_into_marker() -> None:
+    async def run() -> tuple[_RecordingBot, LiveStatusBuffer, bool]:
+        bot = _RecordingBot()
+        buf = _make_buffer(bot)
+        ok = await buf.finalize("✅ Done")
+        return bot, buf, ok
+
+    bot, buf, ok = asyncio.run(run())
+    assert ok is True
+    assert bot.edits[-1] == (42, "✅ Done")
+    assert buf._closed  # worker stopped, later appends are ignored
+
+
+def test_finalize_leaves_buffer_with_history_alone() -> None:
+    async def run() -> tuple[_RecordingBot, bool]:
+        bot = _RecordingBot()
+        buf = _make_buffer(bot)
+        await buf.append("🔧 Read: a.py")
+        ok = await buf.finalize("✅ Done")
+        await buf.close()
+        return bot, ok
+
+    bot, ok = asyncio.run(run())
+    assert ok is False
+    assert all(text != "✅ Done" for _, text in bot.edits)
+
+
+def test_finalize_after_close_returns_false() -> None:
+    async def run() -> tuple[_RecordingBot, bool]:
+        bot = _RecordingBot()
+        buf = _make_buffer(bot)
+        await buf.close()
+        return bot, await buf.finalize("✅ Done")
+
+    bot, ok = asyncio.run(run())
+    assert ok is False
+    assert all(text != "✅ Done" for _, text in bot.edits)

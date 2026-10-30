@@ -687,14 +687,33 @@ async def send_streaming_response(
         # Telegram renders bare-emoji messages huge, the trailing word
         # keeps the line normal-sized.
         if event.type == "result" and ctx.used_tmux:
-            try:
-                await ctx.message.answer(t("ui.turn_done"))
-            except Exception:
-                logger.warning(
-                    "turn-done marker send failed on channel %s",
-                    ctx.channel_key,
-                    exc_info=True,
-                )
+            # A pure-text turn never appended a status line, so the live
+            # placeholder still says "Thinking..." — finalize it into the ✅
+            # marker itself instead of leaving a stale placeholder above the
+            # answer. A buffer with status history keeps its page and gets
+            # the marker as a separate message.
+            finalized = False
+            if ctx.stream_mode == "live" and ctx.tmux_manager is not None:
+                raw_buf = ctx.tmux_manager.get_buffer(ctx.channel_key)
+                done_buf = raw_buf if isinstance(raw_buf, LiveStatusBuffer) else None
+                if done_buf is not None:
+                    try:
+                        finalized = await done_buf.finalize(t("ui.turn_done"))
+                    except Exception:
+                        logger.warning(
+                            "live buffer finalize failed on channel %s",
+                            ctx.channel_key,
+                            exc_info=True,
+                        )
+            if not finalized:
+                try:
+                    await ctx.message.answer(t("ui.turn_done"))
+                except Exception:
+                    logger.warning(
+                        "turn-done marker send failed on channel %s",
+                        ctx.channel_key,
+                        exc_info=True,
+                    )
             return
 
         # Central empty-content guard (W1.2). CC emits empty events at
@@ -829,8 +848,15 @@ def build_recovery_on_event_factory(
 
             # Turn-completion sentinel (synthesized on stop_reason=end_turn —
             # see tui/transcript.py): same ✅ completion signal as the
-            # user-message path in send_streaming_response.
+            # user-message path in send_streaming_response, including the
+            # empty-placeholder finalize (a stale "Thinking..." reads as a
+            # stuck stream).
             if event.type == "result":
+                if stream_mode == "live":
+                    raw_buf = tmux_manager.get_buffer(channel_key)
+                    done_buf = raw_buf if isinstance(raw_buf, LiveStatusBuffer) else None
+                    if done_buf is not None and await done_buf.finalize(t("ui.turn_done")):
+                        return
                 await bot.send_message(chat_id, t("ui.turn_done"), message_thread_id=thread_id)
                 return
 
