@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 # How much of the file tail to scan for the newest assistant line. A tool
@@ -126,3 +127,81 @@ def compact_boundary_since(transcript: Path, offset: int) -> bool:
                 carry = chunk[-len(_COMPACT_BOUNDARY) :]
     except OSError:
         return False
+
+
+# How far back to look for a `/compact` that has not finished yet. A
+# queued compaction can sit behind a long turn while the transcript grows
+# with its tool output, so this is much larger than the usage tail.
+_COMPACT_SCAN_BYTES = 8 * 1024 * 1024
+
+# A `/compact` older than this without a boundary is treated as lost
+# (CC crashed mid-compaction, the queued command was edited away) rather
+# than as "still running" — otherwise the watchdog would never fire again
+# on that session.
+_MAX_PENDING_COMPACT_SEC = 45 * 60
+
+
+def compact_pending(transcript: Path, now: float | None = None) -> bool:
+    """True when the transcript's newest compaction marker is a `/compact`
+    that has not produced its `compact_boundary` yet.
+
+    Read from the transcript, not from memory, so it survives a bot
+    restart and also sees compactions typed by hand into the pane — both
+    were behind the 2026-10-30 double compaction: a reload wiped the
+    in-process gate and the next watchdog tick queued a second `/compact`
+    behind the still-pending first one. `now` is unix time for tests.
+    """
+    try:
+        size = transcript.stat().st_size
+        with transcript.open("rb") as fh:
+            if size > _COMPACT_SCAN_BYTES:
+                fh.seek(size - _COMPACT_SCAN_BYTES)
+                fh.readline()  # drop the partial first line
+            tail = fh.read()
+    except OSError:
+        return False
+    for raw in reversed(tail.splitlines()):
+        if _COMPACT_BOUNDARY in raw:
+            if _parse_compact_boundary(raw) is not None:
+                return False  # boundary is newer than any pending command
+            continue
+        if b"/compact" not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if not _is_compact_command(entry):
+            continue
+        return _is_fresh(entry, now)
+    return False
+
+
+def _is_compact_command(entry: dict[str, object]) -> bool:
+    """A queued or submitted `/compact` — both shapes CC writes."""
+    if entry.get("type") == "queue-operation" and entry.get("operation") == "enqueue":
+        return entry.get("content") == "/compact"
+    if entry.get("type") == "user":
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            return False
+        content = message.get("content")
+        if content == "/compact":
+            return True
+        return isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("text") == "/compact" for b in content
+        )
+    return False
+
+
+def _is_fresh(entry: dict[str, object], now: float | None) -> bool:
+    stamp = entry.get("timestamp")
+    if not isinstance(stamp, str) or now is None:
+        return True
+    try:
+        written = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return True
+    return now - written < _MAX_PENDING_COMPACT_SEC

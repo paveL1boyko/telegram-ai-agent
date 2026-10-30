@@ -355,10 +355,14 @@ still exists as a legacy alias, but `/clear` is the command shown in the menu.
   `AUTO_COMPACT_CHECK_SEC` (default 300 s) and sends `/compact` automatically
   once it exceeds the threshold (`AUTO_COMPACT_TOKENS`, default 220000).
   `/autocompact 150k` overrides the topic, `/autocompact off` disables it,
-  `/autocompact default` returns to the bot default. Right behind the
-  automatic `/compact` the bot types `AUTO_COMPACT_CONTINUE_PROMPT` (default
-  `continue`), so the CLI queue holds both entries and a long task resumes
-  after the compaction instead of idling at the prompt (empty = compact only).
+  `/autocompact default` returns to the bot default. The bot then sends
+  `AUTO_COMPACT_CONTINUE_PROMPT` (default `continue`) so a long task resumes
+  after the compaction instead of idling at the prompt: right behind the
+  `/compact` on an idle session, or once the compaction has landed on a busy
+  one (the CLI folds plain text into a running turn, so an earlier continue
+  would be swallowed). Empty = compact only. A `/compact` that is still
+  pending in the transcript — queued by a previous bot process or typed by
+  hand — blocks another automatic one until it finishes.
 - `/language`: show or switch UI language, for example `/language ru`.
 - `/uimode`: forum topics only; choose `tmux` or `subprocess`. Switching from
   `tmux` to `subprocess` stops the active tmux session.

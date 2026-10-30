@@ -16,7 +16,11 @@ from unittest.mock import patch
 from telegram_bot.core.services import tmux_manager as tmux_manager_module
 from telegram_bot.core.services.tmux_manager import TmuxManager
 from telegram_bot.core.services.tmux_state import TmuxSessionState
-from telegram_bot.core.tui.context_usage import compact_boundary_since, read_context_usage
+from telegram_bot.core.tui.context_usage import (
+    compact_boundary_since,
+    compact_pending,
+    read_context_usage,
+)
 
 IDLE_PANE = "────────\n  ⏵⏵ bypass permissions on\n"
 BUSY_PANE = "⏺ Working on it…\n  esc to interrupt\n"
@@ -25,6 +29,17 @@ COMPACT_BOUNDARY_LINE = json.dumps(
         "type": "system",
         "subtype": "compact_boundary",
         "compactMetadata": {"preTokens": 230000, "postTokens": 12000},
+    }
+)
+# 2026-10-30T13:02:04Z — the real enqueue stamp from the double-compaction incident.
+ENQUEUE_TS = "2026-10-30T13:02:04.819Z"
+ENQUEUE_UNIX = 1793365324.819
+COMPACT_ENQUEUE_LINE = json.dumps(
+    {
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "timestamp": ENQUEUE_TS,
+        "content": "/compact",
     }
 )
 
@@ -106,6 +121,37 @@ def test_compact_boundary_since_only_counts_lines_after_offset(tmp_path: Path) -
     assert compact_boundary_since(tmp_path / "missing.jsonl", 0) is False
 
 
+def test_compact_pending_reads_queue_operations(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(_assistant_line("a1", cached=230_000) + "\n")
+    assert compact_pending(transcript, now=ENQUEUE_UNIX) is False
+
+    with transcript.open("a") as fh:
+        fh.write(COMPACT_ENQUEUE_LINE + "\n")
+    # Queued, boundary not written yet → a re-started watchdog must not
+    # queue a second /compact behind this one (the 2026-10-30 double run).
+    assert compact_pending(transcript, now=ENQUEUE_UNIX + 60) is True
+
+    with transcript.open("a") as fh:
+        fh.write(COMPACT_BOUNDARY_LINE + "\n")
+    assert compact_pending(transcript, now=ENQUEUE_UNIX + 60) is False
+
+
+def test_compact_pending_sees_a_submitted_and_a_stale_command(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    submitted = json.dumps(
+        {
+            "type": "user",
+            "timestamp": ENQUEUE_TS,
+            "message": {"role": "user", "content": "/compact"},
+        }
+    )
+    transcript.write_text(submitted + "\n")
+    assert compact_pending(transcript, now=ENQUEUE_UNIX) is True
+    # Older than the "lost compaction" window → treat as dead, not pending.
+    assert compact_pending(transcript, now=ENQUEUE_UNIX + 60 * 60) is False
+
+
 # --- _check_channel_context -------------------------------------------------
 
 
@@ -164,8 +210,20 @@ def _wire(
     mgr.send_direct = fake_send_direct  # type: ignore[method-assign]
     if monkeypatch is not None:
         monkeypatch.setattr(tmux_manager_module, "capture_pane", fake_capture)
+        monkeypatch.setattr(tmux_manager_module, "_AUTO_COMPACT_RESUME_POLL_SEC", 0)
         monkeypatch.setattr(tmux_manager_module, "_AUTO_COMPACT_RESUME_SETTLE_SEC", 0)
     return key, transcript, sent
+
+
+async def _drain_resume_tasks(mgr: TmuxManager) -> None:
+    if mgr._auto_compact_resume_tasks:
+        await asyncio.gather(*mgr._auto_compact_resume_tasks)
+
+
+async def _cancel_resume_tasks(mgr: TmuxManager) -> None:
+    for task in list(mgr._auto_compact_resume_tasks):
+        task.cancel()
+    await asyncio.gather(*mgr._auto_compact_resume_tasks, return_exceptions=True)
 
 
 async def test_compacts_and_queues_continue_when_over_default_threshold(
@@ -232,6 +290,34 @@ async def test_compaction_in_flight_in_pane_is_not_doubled(tmp_path: Path, monke
     assert key not in mgr._auto_compact_seen
 
 
+async def test_pending_compact_in_transcript_survives_restart(tmp_path: Path, monkeypatch) -> None:
+    """2026-10-30: a `/compact` queued by the previous bot process was still
+    waiting behind a long turn when the bot restarted; the fresh process
+    had no in-memory gate and queued a second one. The transcript's
+    enqueue line without a boundary is the gate that survives."""
+    mgr = _manager(tmp_path, default_tokens=220_000)  # fresh process: empty _pending
+    key, transcript, sent = _wire(
+        mgr,
+        tmp_path,
+        [_assistant_line("a1", cached=230_000), COMPACT_ENQUEUE_LINE],
+        pane=BUSY_PANE,
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(tmux_manager_module.time, "time", lambda: ENQUEUE_UNIX + 300)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert sent == []
+
+    # Boundary lands, the next turn is still oversized → one new compact.
+    with transcript.open("a") as fh:
+        fh.write(COMPACT_BOUNDARY_LINE + "\n")
+        fh.write(_assistant_line("a2", cached=240_000) + "\n")
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert [p for _, p, _ in sent] == ["/compact"]
+    await _cancel_resume_tasks(mgr)  # busy pane → a boundary waiter was spawned
+
+
 def test_compact_boundary_supersedes_stale_usage(tmp_path: Path) -> None:
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(
@@ -295,15 +381,15 @@ def test_context_tokens_reports_measurement(tmp_path: Path) -> None:
     assert mgr.context_tokens(key) == 12_345
 
 
-# --- continue queued behind the compact -------------------------------------
+# --- continue after the compact ---------------------------------------------
 
 
-async def test_busy_session_queues_continue_immediately(tmp_path: Path, monkeypatch) -> None:
-    """Compact fired mid-task (pane shows `esc to interrupt`): the continue
-    prompt is typed right behind the compact instead of waiting for the
-    compact_boundary, so CC's queue holds both entries."""
+async def test_busy_session_waits_for_boundary_before_continue(tmp_path: Path, monkeypatch) -> None:
+    """Compact fired mid-task: CC absorbs plain text into the running turn
+    (`absorbed_mid_turn`), so the continue only goes in once the
+    compact_boundary proves the compaction finished."""
     mgr = _manager(tmp_path, default_tokens=220_000)
-    key, _transcript, sent = _wire(
+    key, transcript, sent = _wire(
         mgr,
         tmp_path,
         [_assistant_line("a1", cached=230_000)],
@@ -312,21 +398,27 @@ async def test_busy_session_queues_continue_immediately(tmp_path: Path, monkeypa
     )
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
+        assert sent == [(key, "/compact", False)]
+        assert len(mgr._auto_compact_resume_tasks) == 1
+        await asyncio.sleep(0)
+        with transcript.open("a") as fh:
+            fh.write(COMPACT_BOUNDARY_LINE + "\n")
+        await _drain_resume_tasks(mgr)
 
     assert sent == [(key, "/compact", False), (key, "continue", True)]
 
 
-async def test_idle_session_queues_continue_too(tmp_path: Path, monkeypatch) -> None:
-    """The 2026-10-30 regression: an idle session that crossed the threshold
-    between turns was compacted but never resumed — the continue is now
-    unconditional."""
+async def test_idle_session_queues_continue_immediately(tmp_path: Path, monkeypatch) -> None:
+    """An idle session has nothing to absorb the text, so both entries go in
+    back-to-back — the reason the unconditional-immediate variant existed."""
     mgr = _manager(tmp_path, default_tokens=220_000)
     key, _transcript, sent = _wire(
         mgr, tmp_path, [_assistant_line("a1", cached=230_000)], monkeypatch=monkeypatch
     )
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
-    assert [p for _, p, _ in sent] == ["/compact", "continue"]
+    assert sent == [(key, "/compact", False), (key, "continue", True)]
+    assert mgr._auto_compact_resume_tasks == set()
 
 
 async def test_continue_disabled_by_empty_prompt(tmp_path: Path, monkeypatch) -> None:
@@ -341,6 +433,7 @@ async def test_continue_disabled_by_empty_prompt(tmp_path: Path, monkeypatch) ->
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
     assert sent == [(key, "/compact", False)]
+    assert mgr._auto_compact_resume_tasks == set()
 
 
 async def test_continue_skipped_when_compact_not_delivered(tmp_path: Path, monkeypatch) -> None:
@@ -361,7 +454,7 @@ async def test_continue_skipped_when_compact_not_delivered(tmp_path: Path, monke
     assert sent == [(key, "/compact", False)]
 
 
-async def test_continue_aborts_when_session_replaced(tmp_path: Path, monkeypatch) -> None:
+async def test_idle_continue_aborts_when_session_replaced(tmp_path: Path, monkeypatch) -> None:
     """`/new` during the settle pause: the continue prompt must not land in
     the replacement session."""
     mgr = _manager(tmp_path, default_tokens=220_000)
@@ -371,7 +464,7 @@ async def test_continue_aborts_when_session_replaced(tmp_path: Path, monkeypatch
     real_sleep = asyncio.sleep
 
     async def swap_during_settle(delay: float) -> None:
-        # The settle pause is the only sleep left in the check once
+        # The settle pause is the only sleep left in the idle path once
         # capture_pane and send_direct are stubbed.
         mgr._sessions[key] = _state(tmp_path)  # fresh state object
         await real_sleep(0)
@@ -381,4 +474,24 @@ async def test_continue_aborts_when_session_replaced(tmp_path: Path, monkeypatch
         patch.object(tmux_manager_module.asyncio, "sleep", swap_during_settle),
     ):
         await mgr._check_channel_context(key)
+    assert sent == [(key, "/compact", False)]
+
+
+async def test_busy_resume_aborts_when_session_replaced(tmp_path: Path, monkeypatch) -> None:
+    """`/new` while waiting for the boundary: no continue into the new
+    session."""
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, transcript, sent = _wire(
+        mgr,
+        tmp_path,
+        [_assistant_line("a1", cached=230_000)],
+        pane=BUSY_PANE,
+        monkeypatch=monkeypatch,
+    )
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+        mgr._sessions[key] = _state(tmp_path)  # fresh state object
+        with transcript.open("a") as fh:
+            fh.write(COMPACT_BOUNDARY_LINE + "\n")
+        await _drain_resume_tasks(mgr)
     assert sent == [(key, "/compact", False)]

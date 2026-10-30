@@ -89,9 +89,10 @@ class Settings(BaseSettings):
     auto_compact_tokens: int = 220_000
     auto_compact_check_sec: float = 300.0
     # After an automatic `/compact` the CLI idles at the prompt, so the
-    # task in flight would stall. This prompt is typed right behind the
-    # compact command — CC queues both, runs the compaction, then resumes
-    # with this message. Empty = compact only.
+    # task in flight would stall. The bot sends this prompt to resume it:
+    # right behind the compact on an idle session, or once the compaction
+    # has landed on a busy one (CC folds plain text into a running turn).
+    # Empty = compact only.
     auto_compact_continue_prompt: str = "continue"
     # Rename forum topics to "<cwd folder> · <short model>" on /cwd and
     # model/engine switches, so the topic list shows where each session
