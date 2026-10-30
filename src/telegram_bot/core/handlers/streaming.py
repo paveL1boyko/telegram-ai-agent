@@ -13,7 +13,7 @@ from typing import Any
 from aiogram import Bot
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup
 from aiogram.utils.text_decorations import HtmlDecoration
 
 from telegram_bot.core.keyboards import topic_keyboard
@@ -122,6 +122,20 @@ def inject_reply_context(prompt: str, reply_context: str) -> str:
     return t("cc.reply_context", context=reply_context, reply=prompt)
 
 
+def _turn_reply_keyboard(message: Message) -> ReplyKeyboardMarkup | None:
+    """Reply keyboard to attach to a per-turn message (forum groups only).
+
+    Telegram keeps showing whichever reply keyboard the bot sent last, so a
+    layout change in `topic_keyboard` only reaches the client with the next
+    message that carries the markup. The subprocess path attaches it to the
+    final answer; the tmux path has no final answer (results stream from
+    the tail), so the "Thinking..." placeholder carries it instead — it is
+    the one message every turn sends. Private chats get none: the buttons
+    would route to the General topic.
+    """
+    return topic_keyboard() if message.chat.type == ChatType.SUPERGROUP else None
+
+
 async def send_to_tmux_if_active(
     key: ChannelKey,
     prompt: str,
@@ -163,7 +177,9 @@ async def send_to_tmux_if_active(
 
     cmd = prompt.split()[0] if prompt.startswith("/") else None
     thinking_text = t("ui.running_command", command=cmd) if cmd else t("ui.thinking")
-    thinking_msg = await source_msg.answer(thinking_text, disable_notification=True)
+    thinking_msg = await source_msg.answer(
+        thinking_text, disable_notification=True, reply_markup=_turn_reply_keyboard(source_msg)
+    )
 
     if stream_mode == "live" and tmux_manager.live_buffer_available():
         bot = tmux_manager.get_live_bot()
@@ -519,10 +535,7 @@ async def _send_final_response(ctx: _StreamCtx, final_text: str) -> None:
     progress updates. Aborts early if a prior handler already flipped
     ``send_failed`` (Telegram clearly rejecting everything).
     """
-    # Supergroup forum: topic_keyboard (3 buttons in a row)
-    # Private chat: no keyboard (buttons would go to General topic)
-    is_group = ctx.message.chat.type == ChatType.SUPERGROUP
-    reply_kb = topic_keyboard() if is_group else None
+    reply_kb = _turn_reply_keyboard(ctx.message)
 
     chunks = split_html_message(final_text)
     response_message_ids: list[int] = []
@@ -590,7 +603,9 @@ async def send_streaming_response(
 
     cmd = prompt.split()[0] if prompt.startswith("/") else None
     thinking_text = t("ui.running_command", command=cmd) if cmd else t("ui.thinking")
-    thinking_msg = await message.answer(thinking_text, disable_notification=True)
+    thinking_msg = await message.answer(
+        thinking_text, disable_notification=True, reply_markup=_turn_reply_keyboard(message)
+    )
     sent_message_ids.append(thinking_msg.message_id)
 
     used_tmux = tmux_manager is not None and tmux_manager.is_active(channel_key)
