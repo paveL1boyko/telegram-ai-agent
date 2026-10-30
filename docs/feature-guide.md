@@ -80,17 +80,21 @@ a phone. Short model names collapse the Claude family
 `manage_topics` admin right, failures are logged and swallowed. Assistant
 topics (no cwd concept) are never renamed.
 
-Each topic can carry an `emoji` in `topic_config.json`. When it is one of
+The topic icon follows the model (`model_emoji` in `topic_naming.py`: opus 🧠,
+fable 🔮, gpt 🔥, kimi 💎, grok ⚡️, glm 🧪, …, chosen for distinct colours
+so topics are telling apart at sidebar size), so a model switch re-badges
+the topic along with the name. A per-topic `emoji` in `topic_config.json`
+pins a different icon (`null` = follow the model). When the emoji is one of
 Telegram's forum icon emoji (`getForumTopicIconStickers`, ~110 entries,
 fetched once at startup) it becomes the topic icon; otherwise it is inlined
-as a name prefix. `emoji: null` means "leave the icon alone" — an icon picked
-in the Telegram UI is mirrored back into `emoji` by the
-`forum_topic_edited` handler, and a freshly created topic gets a default from
-`default_topic_emoji` so the config always shows a line the operator can edit
-by hand. Existing topics are brought onto the current scheme by a startup
+as a name prefix. An icon picked by a human in the Telegram UI is mirrored
+into `emoji` by the `forum_topic_edited` handler (the bot's own edits echo
+there too and are deliberately not persisted, so the icon keeps following
+the model). Existing topics are brought onto the current scheme by a startup
 pass over restored tmux sessions (`sync_all_topic_names`) and, for topics
 without a session, once per process on their first text message
-(`sync_topic_name_once`).
+(`sync_topic_name_once`). A config entry without `type` parses as
+`assistant`; it is still autonamed when it carries its own `cwd`.
 
 Pinning topics in a fixed order is not possible through the Bot API — there is
 no pin/reorder method for forum topics (only `pinChatMessage` for messages);

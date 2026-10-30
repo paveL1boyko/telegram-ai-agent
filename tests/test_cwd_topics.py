@@ -14,7 +14,7 @@ from telegram_bot.core.services.cwd_picker import CwdPickerState, CwdPickerStore
 from telegram_bot.core.services.topic_config import TopicConfig
 from telegram_bot.core.services.topic_naming import (
     abbreviate_folder,
-    default_topic_emoji,
+    model_emoji,
     set_topic_icons,
     short_model_name,
     sync_all_topic_names,
@@ -82,10 +82,20 @@ def test_topic_icon_lookup_ignores_variation_selector() -> None:
         set_topic_icons({})
 
 
-def test_default_topic_emoji_avoids_taken_and_is_stable() -> None:
-    first = default_topic_emoji(42, [])
-    assert first == default_topic_emoji(42, [])
-    assert default_topic_emoji(42, [first]) != first
+def test_model_emoji_follows_model_family() -> None:
+    assert model_emoji("anthropic/claude-opus-5[1m]") == "🧠"
+    assert model_emoji("anthropic/claude-fable-5[1m]") == "🔮"
+    assert model_emoji("openrouter/openai/gpt-5.5[1m]") == "🔥"
+    assert model_emoji("openrouter/moonshotai/kimi-k3[1m]") == "💎"
+    assert model_emoji("openrouter/x-ai/grok-4.6[1m]") == "⚡️"
+    assert model_emoji("selectel/z-ai/glm-5.3") == "🧪"
+    # Unknown vendor → neutral default; no override → engine decides.
+    assert model_emoji("openrouter/acme/wizard-9") == "💻"
+    assert model_emoji(None, "claude") == "🔮"
+    assert model_emoji(None, "codex") == "🤖"
+    # Distinct models never share an icon among the presets the bot offers.
+    presets = Settings(telegram_bot_token="test").model_presets
+    assert len({model_emoji(m) for m in presets}) == len(presets)
 
 
 def test_list_subdirs_skips_hidden_and_files(tmp_path: Path) -> None:
@@ -263,7 +273,8 @@ async def test_apply_cwd_override_restarts_tmux_and_renames(tmp_path: Path) -> N
     assert len(tmux.started) == 1
     assert tmux.started[0]["cwd"] == str(work)
     assert session_manager.killed == [(100, 42)]
-    assert bot.renames == [(100, 42, "Xp.Ge")]
+    # No icon catalog in tests → the model emoji (claude default → fable) is inlined.
+    assert bot.renames == [(100, 42, "🔮 Xp.Ge")]
     assert text == t("ui.cwd_set_restarted", cwd=str(work))
 
 
@@ -312,7 +323,7 @@ async def test_sync_topic_name_includes_short_model_suffix(tmp_path: Path) -> No
         topic_config=topic_config,
         defaults=defaults,
     )
-    expected = f"{abbreviate_folder(tmp_path.name)} · fable"
+    expected = f"🔮 {abbreviate_folder(tmp_path.name)} · fable"
     assert bot.renames == [(100, 42, expected)]
 
     # Second call with an unchanged name is a no-op: update the recorded
@@ -343,13 +354,24 @@ async def test_sync_topic_name_includes_short_model_suffix(tmp_path: Path) -> No
 
 
 async def test_sync_all_topic_names_applies_emoji_icon(tmp_path: Path) -> None:
+    work = tmp_path / "ceneo"
+    work.mkdir()
     config_path = tmp_path / "topic_config.json"
     config_path.write_text(
         json.dumps(
             {
                 "topics": {
+                    # Explicit emoji override wins over the model mapping.
                     "42": {"name": "old", "type": "project", "cwd": None, "emoji": "🤖"},
                     "43": {"name": "helper", "type": "assistant", "cwd": None},
+                    # No `type` (parses as assistant) but has its own cwd —
+                    # the 2026-10-30 `ceneo_pl gpt` entry that was never
+                    # renamed. Icon follows the model.
+                    "44": {
+                        "name": "ceneo_pl gpt",
+                        "cwd": str(work),
+                        "model": "openrouter/openai/gpt-5.5[1m]",
+                    },
                 }
             }
         )
@@ -357,20 +379,39 @@ async def test_sync_all_topic_names_applies_emoji_icon(tmp_path: Path) -> None:
     topic_config = TopicConfig(str(config_path))
     bot = _FakeBot()
     defaults = BotDefaults(cwd=tmp_path / "telegram-ai-agent", mcp_config=tmp_path / "mcp.json")
-    set_topic_icons({"🤖": "robot-id"})
+    set_topic_icons({"🤖": "robot-id", "🔥": "fire-id"})
     try:
         renamed = await sync_all_topic_names(
             bot,  # type: ignore[arg-type]
-            channel_keys=[(100, 42), (100, 43), (100, None)],
+            channel_keys=[(100, 42), (100, 43), (100, 44), (100, None)],
             topic_config=topic_config,
             defaults=defaults,
         )
     finally:
         set_topic_icons({})
     # Assistant topic and the General (None) pseudo-topic are skipped.
-    assert renamed == 1
-    assert bot.renames == [(100, 42, "Te.Ai.Ag")]
-    assert bot.icons == ["robot-id"]
+    assert renamed == 2
+    assert bot.renames == [(100, 42, "Te.Ai.Ag"), (100, 44, "Ce · gpt-5.5")]
+    assert bot.icons == ["robot-id", "fire-id"]
+
+
+async def test_sync_topic_name_inlines_emoji_without_icon(tmp_path: Path) -> None:
+    topic_config = _make_topic_config(
+        tmp_path, exec_mode="tmux", model="anthropic/claude-opus-5[1m]"
+    )
+    bot = _FakeBot()
+    defaults = BotDefaults(cwd=tmp_path, mcp_config=tmp_path / "mcp.json")
+    # Icon catalog unknown (fetch failed) → the model emoji becomes a name prefix.
+    set_topic_icons({})
+    await sync_topic_name(
+        bot,  # type: ignore[arg-type]
+        chat_id=100,
+        thread_id=42,
+        topic_config=topic_config,
+        defaults=defaults,
+    )
+    assert bot.renames == [(100, 42, f"🧠 {abbreviate_folder(tmp_path.name)} · opus")]
+    assert bot.icons == [None]
 
 
 async def test_sync_topic_name_skips_assistant_topics(tmp_path: Path) -> None:

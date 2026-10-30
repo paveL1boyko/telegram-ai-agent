@@ -58,6 +58,40 @@ def test_end_turn_without_text_still_signals() -> None:
     assert [e.type for e in events] == ["result"]
 
 
+def test_end_turn_on_tool_use_record_has_no_sentinel() -> None:
+    # Real record shape from the 2026-10-29 incident: x-ai/grok-4.6 via
+    # OpenRouter stamped stop_reason=end_turn on each of 733 per-tool_use
+    # records of one message. Only the text-only tail of a turn may signal.
+    raw = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_7e46ae911ade55f40bc16688",
+                "model": "x-ai/grok-4.6",
+                "stop_reason": "end_turn",
+                "content": [{"type": "tool_use", "id": "call-32", "name": "Read", "input": {}}],
+            },
+        }
+    )
+    events, _ = parse_transcript_event(raw)
+    assert all(e.type != "result" for e in events)
+    # Mixed text + tool_use is still mid-turn.
+    mixed = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "text", "text": "let me look"},
+                    {"type": "tool_use", "id": "call-1", "name": "Read", "input": {}},
+                ],
+            },
+        }
+    )
+    events, _ = parse_transcript_event(mixed)
+    assert all(e.type != "result" for e in events)
+
+
 def test_missing_stop_reason_has_no_sentinel() -> None:
     events, _ = parse_transcript_event(_assistant_line(None))
     assert [e.type for e in events] == ["text"]

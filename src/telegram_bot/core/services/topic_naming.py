@@ -5,7 +5,9 @@ switches rename the Telegram topic to `<cwd-abbrev> · <short-model>` so the
 topic list reads like a dashboard of running sessions. The cwd folder is
 abbreviated to the first two letters of each word (`telegram-ai-agent` →
 `Te.Ai.Ag`) — full folder names made the topic list unreadable on a phone.
-The rename goes through the Bot API `editForumTopic`; the resulting
+The topic icon follows the model (`model_emoji`: opus 🧠, fable 🔮, gpt 🤖,
+kimi 🔬, grok ⚡️, …) unless the topic's `emoji` config field pins one. The
+rename goes through the Bot API `editForumTopic`; the resulting
 `forum_topic_edited` update flows back into `handlers/forum_topic.py`,
 which syncs the name into topic_config.json — the config stays a mirror of
 what Telegram shows.
@@ -27,7 +29,7 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 
-from telegram_bot.core.services.topic_config import TopicConfig
+from telegram_bot.core.services.topic_config import TopicConfig, TopicSettings
 from telegram_bot.core.services.topic_runtime import BotDefaults, resolve_topic_runtime_config
 from telegram_bot.core.types import ChannelKey
 
@@ -111,11 +113,6 @@ _icon_emoji: dict[str, str] = {}
 
 _VARIATION_SELECTOR = "️"
 
-# Fallback palette for `default_topic_emoji` when the icon set could not be
-# fetched — all members of that set, so a later fetch upgrades them to real
-# icons without changing the config.
-_FALLBACK_EMOJI = ("🤖", "💻", "🧪", "🔬", "🔭", "💡", "📁", "🔎", "🧠", "🎨", "💎", "🏁")
-
 
 def _icon_key(emoji: str) -> str:
     return emoji.replace(_VARIATION_SELECTOR, "")
@@ -157,30 +154,74 @@ def topic_icon_emoji(icon_custom_emoji_id: str | None) -> str | None:
     return _icon_emoji.get(icon_custom_emoji_id)
 
 
-def default_topic_emoji(thread_id: int, taken: Iterable[str]) -> str:
-    """Pick a marker for a topic that has none, distinct from `taken` when possible.
+# Model family → topic icon. The icon is the fastest way to tell topics
+# apart in the Telegram sidebar, and the user runs one model per topic, so
+# "which model is this" is the question the icon answers. Picked for
+# distinct dominant colours (Telegram's forum icon set is fixed, ~110
+# emoji), because two grey icons are indistinguishable at sidebar size:
+# opus pink, fable purple, gpt orange, grok yellow, kimi blue, glm green.
+# Keys are matched as prefixes of the short model name
+# (`short_model_name`), first hit wins. A per-topic `emoji` in the config
+# overrides this mapping.
+_MODEL_EMOJI: tuple[tuple[str, str], ...] = (
+    ("opus", "🧠"),
+    ("fable", "🔮"),
+    ("sonnet", "🎶"),
+    ("haiku", "✍️"),
+    ("gpt", "🔥"),
+    ("o1", "🔥"),
+    ("o3", "🔥"),
+    ("kimi", "💎"),
+    ("grok", "⚡️"),
+    ("glm", "🧪"),
+    ("gemini", "🆒"),
+    ("deepseek", "🐟"),
+    ("qwen", "🧮"),
+    ("llama", "🦄"),
+    ("mistral", "⛅️"),
+)
+_ENGINE_EMOJI: dict[str, str] = {"codex": "🤖", "nessy": "🎓"}
+_DEFAULT_MODEL_EMOJI = "💻"
 
-    Deterministic in `thread_id` so a config rewrite without the field
-    lands on the same emoji again; drawn from the fallback palette, which is
-    a subset of the forum icon set, so the pick is always a real icon.
+
+def model_emoji(model: str | None, engine: str | None = None) -> str:
+    """Icon for the model (or, with no model override, the engine) running in a topic."""
+    short = short_model_name(model)
+    if short:
+        lowered = short.lower()
+        for prefix, emoji in _MODEL_EMOJI:
+            if lowered.startswith(prefix):
+                return emoji
+        return _DEFAULT_MODEL_EMOJI
+    if engine and engine in _ENGINE_EMOJI:
+        return _ENGINE_EMOJI[engine]
+    # The claude engine without an override runs the CLI's default model —
+    # an Anthropic one, so the fable icon is the honest guess.
+    return "🔮" if engine in (None, "claude") else _DEFAULT_MODEL_EMOJI
+
+
+def _is_autonamed(topic: TopicSettings) -> bool:
+    """Project topics and any topic with its own cwd are autonamed.
+
+    Assistant topics without a cwd have no folder concept; auto-naming
+    would collapse them all to the bot default folder name. A config entry
+    missing `type` parses as assistant — if it carries a cwd it is a project
+    topic in all but the label (the 2026-10-30 `ceneo_pl gpt` case).
     """
-    used = {_icon_key(e) for e in taken}
-    free = [e for e in _FALLBACK_EMOJI if _icon_key(e) not in used] or list(_FALLBACK_EMOJI)
-    return free[thread_id % len(free)]
+    return topic.type != "assistant" or topic.cwd is not None
 
 
 def _resolve_topic_title(
     thread_id: int, topic_config: TopicConfig, defaults: BotDefaults
 ) -> tuple[str, str | None] | None:
-    """(name, icon_custom_emoji_id) for a project topic; None for assistant topics."""
+    """(name, icon_custom_emoji_id) for an autonamed topic; None otherwise."""
     topic = topic_config.get_topic(thread_id)
-    if topic.type == "assistant":
-        # Assistant topics have no cwd concept; auto-naming would collapse
-        # them all to the bot default folder name.
+    if not _is_autonamed(topic):
         return None
     runtime = resolve_topic_runtime_config(topic, defaults)
-    icon_id = topic_icon_id(topic.emoji)
-    name = topic_display_name(runtime.cwd, runtime.model, None if icon_id else topic.emoji)
+    emoji = topic.emoji or model_emoji(runtime.model, runtime.engine)
+    icon_id = topic_icon_id(emoji)
+    name = topic_display_name(runtime.cwd, runtime.model, None if icon_id else emoji)
     return name, icon_id
 
 
@@ -241,21 +282,6 @@ async def sync_topic_name(
 _synced_channels: set[ChannelKey] = set()
 
 
-async def ensure_topic_emoji(thread_id: int, topic_config: TopicConfig) -> None:
-    """Assign and persist a default emoji for a freshly created project topic.
-
-    Writes the marker into topic_config.json so the operator sees an `emoji`
-    line they can edit by hand. Only for new topics: existing ones may carry
-    an icon set through the Telegram UI that the config does not know about,
-    and a generated default would overwrite it.
-    """
-    topic = topic_config.get_topic(thread_id)
-    if topic.type == "assistant" or topic.emoji:
-        return
-    taken = [t.emoji for t in topic_config.all_topics().values() if t.emoji]
-    await topic_config.update_emoji(thread_id, default_topic_emoji(thread_id, taken))
-
-
 async def sync_topic_name_once(
     bot: Bot,
     *,
@@ -289,11 +315,11 @@ async def sync_all_topic_names(
     topic_config: TopicConfig,
     defaults: BotDefaults,
 ) -> int:
-    """Startup pass: rename (and re-badge, where `emoji` is set) every known project topic.
+    """Startup pass: rename and re-badge every known autonamed topic.
 
     Returns the number of topics whose edit succeeded. Telegram rate-limits
     editForumTopic like any send, so the loop is sequential and tolerates
-    per-topic failures. A topic without `emoji` keeps whatever icon it has.
+    per-topic failures.
     """
     renamed = 0
     for chat_id, thread_id in sorted({(c, t) for c, t in channel_keys if t is not None}):

@@ -171,6 +171,28 @@ def _events_for_parsed(parsed: ParsedEvent) -> list[StreamEvent]:
     return []
 
 
+def is_turn_end(evt: dict[str, Any]) -> bool:
+    """True iff a raw transcript record marks the end of an assistant turn.
+
+    `stop_reason == "end_turn"` alone is not enough: OpenRouter-routed
+    vendors (observed with x-ai/grok-4.6 on 2026-10-29) stamp `end_turn` on
+    every record of a message, including the per-tool_use records CC writes
+    for a multi-tool response — a degenerate 733-tool_use reply produced 733
+    sentinels and a flood-controlled wall of "✅ Done". A record that still
+    carries a `tool_use` block is mid-turn by definition, whatever the
+    vendor says; the real end of that turn is the later text-only record.
+    """
+    if evt.get("type") != "assistant":
+        return False
+    message = evt.get("message") or {}
+    if message.get("stop_reason") != "end_turn":
+        return False
+    content = message.get("content")
+    if isinstance(content, list):
+        return not any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)
+    return True
+
+
 def parse_transcript_event(
     raw: str,
 ) -> tuple[list[StreamEvent], str | None]:
@@ -181,11 +203,11 @@ def parse_transcript_event(
     Turn boundary: the CC TUI transcript has no `result` records, so an
     assistant message with ``stop_reason == "end_turn"`` is the only precise
     "turn fully done" marker available — we append a bare `result` sentinel
-    after the message's own events. tail_runner forwards it (empty content,
-    so no result_message is synthesized) and the UI posts its completion
-    signal on it. Mid-turn model stops carry ``stop_reason == "tool_use"``
-    and never trigger the sentinel; user interrupts produce no end_turn, so
-    /cancel stays quiet.
+    after the message's own events (see `is_turn_end` for the tool_use
+    guard). tail_runner forwards it (empty content, so no result_message is
+    synthesized) and the UI posts its completion signal on it. Mid-turn
+    model stops carry ``stop_reason == "tool_use"`` and never trigger the
+    sentinel; user interrupts produce no end_turn, so /cancel stays quiet.
     """
     parsed = parse_jsonl_line(raw)
     if parsed is None:
@@ -204,9 +226,6 @@ def parse_transcript_event(
         pass
 
     events = _events_for_parsed(parsed)
-    if (
-        evt.get("type") == "assistant"
-        and (evt.get("message") or {}).get("stop_reason") == "end_turn"
-    ):
+    if is_turn_end(evt):
         events.append(StreamEvent("result", ""))
     return events, session_id

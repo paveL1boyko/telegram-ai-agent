@@ -30,11 +30,7 @@ from telegram_bot.core.keyboards import topic_keyboard
 from telegram_bot.core.messages import t
 from telegram_bot.core.services.claude import DEFAULT_MODE
 from telegram_bot.core.services.topic_config import TopicConfig, normalize_emoji
-from telegram_bot.core.services.topic_naming import (
-    ensure_topic_emoji,
-    sync_topic_name,
-    topic_icon_emoji,
-)
+from telegram_bot.core.services.topic_naming import sync_topic_name, topic_icon_emoji
 from telegram_bot.core.services.topic_runtime import BotDefaults
 
 logger = logging.getLogger(__name__)
@@ -128,7 +124,6 @@ async def on_topic_created(
         return
 
     if settings.topic_autoname and topic_config is not None and bot_defaults is not None:
-        await ensure_topic_emoji(thread_id, topic_config)
         await sync_topic_name(
             bot,
             chat_id=chat_id,
@@ -156,16 +151,23 @@ async def on_topic_created(
 
 
 @router.message(F.forum_topic_edited)
-async def on_topic_edited(message: Message, settings: Settings) -> None:
+async def on_topic_edited(message: Message, settings: Settings, bot: Bot) -> None:
     """Sync the renamed name / changed icon into topic_config.json (other fields untouched)."""
     if message.forum_topic_edited is None or message.message_thread_id is None:
         return
     new_name = message.forum_topic_edited.name
-    # Icon picked through the Telegram UI — mirror it into `emoji` so the
-    # config stays the source of truth and the next autoname keeps it.
-    new_emoji = normalize_emoji(topic_icon_emoji(message.forum_topic_edited.icon_custom_emoji_id))
+    # An icon picked by a human through the Telegram UI becomes the topic's
+    # `emoji` override. The bot's own editForumTopic calls echo back here
+    # too (`from` is the bot) and must NOT be persisted — the icon they set
+    # is derived from the model and has to keep following it.
+    new_emoji: str | None = None
+    actor = message.from_user
+    if actor is None or actor.id != bot.id:
+        new_emoji = normalize_emoji(
+            topic_icon_emoji(message.forum_topic_edited.icon_custom_emoji_id)
+        )
     if new_name is None and new_emoji is None:
-        # icon-only edit with an icon outside the known set, or nothing changed
+        # nothing we mirror changed (bot echo, or an icon outside the known set)
         return
     thread_id = message.message_thread_id
     config_path = _resolve_config_path(settings)
