@@ -13,9 +13,15 @@ from telegram_bot.core.messages import t
 from telegram_bot.core.services.cwd_picker import CwdPickerState, CwdPickerStore, list_subdirs
 from telegram_bot.core.services.topic_config import TopicConfig
 from telegram_bot.core.services.topic_naming import (
+    abbreviate_folder,
+    default_topic_emoji,
+    set_topic_icons,
     short_model_name,
+    sync_all_topic_names,
     sync_topic_name,
     topic_display_name,
+    topic_icon_emoji,
+    topic_icon_id,
 )
 from telegram_bot.core.services.topic_runtime import BotDefaults
 
@@ -36,17 +42,50 @@ def test_short_model_name_keeps_vendor_tails() -> None:
     assert short_model_name("selectel/z-ai/glm-5.3") == "glm-5.3"
 
 
+def test_abbreviate_folder() -> None:
+    assert abbreviate_folder("telegram-ai-agent") == "Te.Ai.Ag"
+    assert abbreviate_folder("ecom_merchants_partners") == "Ec.Me.Pa"
+    assert abbreviate_folder("xpath-generator") == "Xp.Ge"
+    assert abbreviate_folder("ceneo") == "Ce"
+    assert abbreviate_folder("xpathGenerator") == "Xp.Ge"
+    assert abbreviate_folder("my.project v2") == "My.Pr.V2"
+    assert abbreviate_folder("мой_проект") == "Мо.Пр"  # noqa: RUF001
+    # Nothing to abbreviate — returned as-is.
+    assert abbreviate_folder("---") == "---"
+
+
 def test_topic_display_name() -> None:
-    assert topic_display_name("/home/u/xpath-generator", None) == "xpath-generator"
+    assert topic_display_name("/home/u/xpath-generator", None) == "Xp.Ge"
     assert (
         topic_display_name("/home/u/xpath-generator", "anthropic/claude-fable-5[1m]")
-        == "xpath-generator · fable"
+        == "Xp.Ge · fable"
     )
+    # Emoji without a matching topic icon is inlined as a prefix.
+    assert topic_display_name("/home/u/xpath-generator", "opus", "🎯") == "🎯 Xp.Ge · opus"
     # Root cwd has no folder name — fall back to the raw path.
     assert topic_display_name("/", None) == "/"
     # Telegram caps topic names at 128 chars.
     long_name = topic_display_name(f"/x/{'a' * 200}", "opus")
     assert len(long_name) <= 128
+
+
+def test_topic_icon_lookup_ignores_variation_selector() -> None:
+    set_topic_icons({"⚡️": "111", "🤖": "222"})
+    try:
+        assert topic_icon_id("⚡") == "111"
+        assert topic_icon_id("⚡️") == "111"
+        assert topic_icon_id("🎯") is None
+        assert topic_icon_id(None) is None
+        assert topic_icon_emoji("222") == "🤖"
+        assert topic_icon_emoji("999") is None
+    finally:
+        set_topic_icons({})
+
+
+def test_default_topic_emoji_avoids_taken_and_is_stable() -> None:
+    first = default_topic_emoji(42, [])
+    assert first == default_topic_emoji(42, [])
+    assert default_topic_emoji(42, [first]) != first
 
 
 def test_list_subdirs_skips_hidden_and_files(tmp_path: Path) -> None:
@@ -134,9 +173,18 @@ def _make_topic_config(tmp_path: Path, *, exec_mode: str, model: str | None) -> 
 class _FakeBot:
     def __init__(self) -> None:
         self.renames: list[tuple[int, int, str]] = []
+        self.icons: list[str | None] = []
 
-    async def edit_forum_topic(self, *, chat_id: int, message_thread_id: int, name: str) -> None:
+    async def edit_forum_topic(
+        self,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+        name: str,
+        icon_custom_emoji_id: str | None = None,
+    ) -> None:
         self.renames.append((chat_id, message_thread_id, name))
+        self.icons.append(icon_custom_emoji_id)
 
 
 class _TmuxStub:
@@ -215,7 +263,7 @@ async def test_apply_cwd_override_restarts_tmux_and_renames(tmp_path: Path) -> N
     assert len(tmux.started) == 1
     assert tmux.started[0]["cwd"] == str(work)
     assert session_manager.killed == [(100, 42)]
-    assert bot.renames == [(100, 42, "xpath-generator")]
+    assert bot.renames == [(100, 42, "Xp.Ge")]
     assert text == t("ui.cwd_set_restarted", cwd=str(work))
 
 
@@ -264,13 +312,14 @@ async def test_sync_topic_name_includes_short_model_suffix(tmp_path: Path) -> No
         topic_config=topic_config,
         defaults=defaults,
     )
-    assert bot.renames == [(100, 42, f"{tmp_path.name} · fable")]
+    expected = f"{abbreviate_folder(tmp_path.name)} · fable"
+    assert bot.renames == [(100, 42, expected)]
 
     # Second call with an unchanged name is a no-op: update the recorded
     # name in config the way the forum_topic_edited handler would.
     config_path = tmp_path / "topic_config.json"
     data = json.loads(config_path.read_text())
-    data["topics"]["42"]["name"] = f"{tmp_path.name} · fable"
+    data["topics"]["42"]["name"] = expected
     config_path.write_text(json.dumps(data))
     await sync_topic_name(
         bot,  # type: ignore[arg-type]
@@ -280,6 +329,48 @@ async def test_sync_topic_name_includes_short_model_suffix(tmp_path: Path) -> No
         defaults=defaults,
     )
     assert len(bot.renames) == 1
+
+    # force=True re-applies name + icon even when the name is unchanged.
+    await sync_topic_name(
+        bot,  # type: ignore[arg-type]
+        chat_id=100,
+        thread_id=42,
+        topic_config=topic_config,
+        defaults=defaults,
+        force=True,
+    )
+    assert len(bot.renames) == 2
+
+
+async def test_sync_all_topic_names_applies_emoji_icon(tmp_path: Path) -> None:
+    config_path = tmp_path / "topic_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "42": {"name": "old", "type": "project", "cwd": None, "emoji": "🤖"},
+                    "43": {"name": "helper", "type": "assistant", "cwd": None},
+                }
+            }
+        )
+    )
+    topic_config = TopicConfig(str(config_path))
+    bot = _FakeBot()
+    defaults = BotDefaults(cwd=tmp_path / "telegram-ai-agent", mcp_config=tmp_path / "mcp.json")
+    set_topic_icons({"🤖": "robot-id"})
+    try:
+        renamed = await sync_all_topic_names(
+            bot,  # type: ignore[arg-type]
+            channel_keys=[(100, 42), (100, 43), (100, None)],
+            topic_config=topic_config,
+            defaults=defaults,
+        )
+    finally:
+        set_topic_icons({})
+    # Assistant topic and the General (None) pseudo-topic are skipped.
+    assert renamed == 1
+    assert bot.renames == [(100, 42, "Te.Ai.Ag")]
+    assert bot.icons == ["robot-id"]
 
 
 async def test_sync_topic_name_skips_assistant_topics(tmp_path: Path) -> None:

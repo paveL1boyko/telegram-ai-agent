@@ -98,6 +98,25 @@ class TopicSettings:
     # Context-size threshold for the auto-compact watchdog; None → the bot
     # default (`Settings.auto_compact_tokens`), 0 → off for this topic.
     auto_compact_tokens: int | None = None
+    # Visual marker for the topic: becomes the Telegram topic icon when it is
+    # one of the forum icon emoji, otherwise a prefix of the auto-name. Edit
+    # the string in topic_config.json by hand to re-badge a topic.
+    emoji: str | None = None
+
+
+# An emoji with skin tone / ZWJ sequences stays well under this; anything
+# longer is a sentence, not a marker.
+_EMOJI_MAX_LEN = 16
+
+
+def normalize_emoji(emoji: object) -> str | None:
+    """Normalize the per-topic emoji marker; None for empty/invalid values."""
+    if not isinstance(emoji, str):
+        return None
+    normalized = emoji.strip()
+    if not normalized or len(normalized) > _EMOJI_MAX_LEN or any(c.isspace() for c in normalized):
+        return None
+    return normalized
 
 
 def _default_topic() -> TopicSettings:
@@ -299,6 +318,11 @@ class TopicConfig:
                         thread_id,
                     )
 
+                raw_emoji = value.get("emoji")
+                emoji = normalize_emoji(raw_emoji)
+                if raw_emoji is not None and emoji is None:
+                    logger.warning("Invalid emoji %r for topic %d, dropping", raw_emoji, thread_id)
+
                 topics[thread_id] = TopicSettings(
                     name=name,
                     type=topic_type,
@@ -310,6 +334,7 @@ class TopicConfig:
                     engine=engine,
                     model=model,
                     auto_compact_tokens=auto_compact_tokens,
+                    emoji=emoji,
                 )
 
         # Parse routing
@@ -330,6 +355,24 @@ class TopicConfig:
         if thread_id is None:
             return _default_topic()
         return self._topics.get(thread_id, _default_topic())
+
+    def all_topics(self) -> dict[int, TopicSettings]:
+        """Snapshot of every configured topic keyed by thread_id."""
+        self._maybe_reload()
+        return dict(self._topics)
+
+    async def update_emoji(self, thread_id: int, emoji: str | None) -> bool:
+        """Persist the topic's emoji marker (None = no marker)."""
+        normalized = normalize_emoji(emoji)
+        if emoji is not None and normalized is None:
+            logger.warning("update_emoji: invalid emoji %r", emoji)
+            return False
+        return await self._update_topic_field(
+            thread_id=thread_id,
+            field_name="emoji",
+            value=normalized,
+            log_label="update_emoji",
+        )
 
     async def _update_topic_field(
         self, *, thread_id: int, field_name: str, value: object, log_label: str

@@ -70,12 +70,31 @@ mirroring `PickerStore` for `/resume`.
 
 When `Settings.topic_autoname` is on (default; `TOPIC_AUTONAME=false` to
 disable), `/cwd` changes and model/engine switches rename the forum topic to
-`<cwd folder> · <short model>` via `sync_topic_name`
-(`services/topic_naming.py`). Short model names collapse the Claude family
+`<cwd abbrev> · <short model>` via `sync_topic_name`
+(`services/topic_naming.py`). The cwd folder is abbreviated to the first two
+letters of each word (`telegram-ai-agent` → `Te.Ai.Ag`,
+`ecom_merchants_partners` → `Ec.Me.Pa`) so the topic list stays readable on
+a phone. Short model names collapse the Claude family
 (`anthropic/claude-fable-5[1m]` → `fable`) and keep other vendors' tails
 (`kimi-k3`, `gpt-5.5`). Renames are best-effort — the bot needs the
 `manage_topics` admin right, failures are logged and swallowed. Assistant
 topics (no cwd concept) are never renamed.
+
+Each topic can carry an `emoji` in `topic_config.json`. When it is one of
+Telegram's forum icon emoji (`getForumTopicIconStickers`, ~110 entries,
+fetched once at startup) it becomes the topic icon; otherwise it is inlined
+as a name prefix. `emoji: null` means "leave the icon alone" — an icon picked
+in the Telegram UI is mirrored back into `emoji` by the
+`forum_topic_edited` handler, and a freshly created topic gets a default from
+`default_topic_emoji` so the config always shows a line the operator can edit
+by hand. Existing topics are brought onto the current scheme by a startup
+pass over restored tmux sessions (`sync_all_topic_names`) and, for topics
+without a session, once per process on their first text message
+(`sync_topic_name_once`).
+
+Pinning topics in a fixed order is not possible through the Bot API — there is
+no pin/reorder method for forum topics (only `pinChatMessage` for messages);
+"Pin topic" exists solely in the Telegram client UI for group admins.
 
 ## Typing directly into the tmux pane
 

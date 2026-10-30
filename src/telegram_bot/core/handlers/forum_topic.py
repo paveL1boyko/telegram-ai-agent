@@ -29,6 +29,13 @@ from telegram_bot.core.config import Settings
 from telegram_bot.core.keyboards import topic_keyboard
 from telegram_bot.core.messages import t
 from telegram_bot.core.services.claude import DEFAULT_MODE
+from telegram_bot.core.services.topic_config import TopicConfig, normalize_emoji
+from telegram_bot.core.services.topic_naming import (
+    ensure_topic_emoji,
+    sync_topic_name,
+    topic_icon_emoji,
+)
+from telegram_bot.core.services.topic_runtime import BotDefaults
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +88,13 @@ def _save_config(path: Path, data: dict[str, Any]) -> None:
 
 
 @router.message(F.forum_topic_created)
-async def on_topic_created(message: Message, settings: Settings, bot: Bot) -> None:
+async def on_topic_created(
+    message: Message,
+    settings: Settings,
+    bot: Bot,
+    topic_config: TopicConfig | None = None,
+    bot_defaults: BotDefaults | None = None,
+) -> None:
     """Add a new topic to topic_config.json with default mode/cwd, then post a welcome."""
     if message.forum_topic_created is None or message.message_thread_id is None:
         return
@@ -100,7 +113,12 @@ async def on_topic_created(message: Message, settings: Settings, bot: Bot) -> No
         if key in config["topics"]:
             # Already registered (e.g. CC pre-registered or restart re-fired event).
             return
-        config["topics"][key] = _new_entry(name)
+        entry = _new_entry(name)
+        # A user-picked icon on creation wins over the generated default.
+        picked = topic_icon_emoji(message.forum_topic_created.icon_custom_emoji_id)
+        if picked:
+            entry["emoji"] = picked
+        config["topics"][key] = entry
         _save_config(config_path, config)
         newly_registered = True
 
@@ -108,6 +126,17 @@ async def on_topic_created(message: Message, settings: Settings, bot: Bot) -> No
 
     if not newly_registered:
         return
+
+    if settings.topic_autoname and topic_config is not None and bot_defaults is not None:
+        await ensure_topic_emoji(thread_id, topic_config)
+        await sync_topic_name(
+            bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            topic_config=topic_config,
+            defaults=bot_defaults,
+            force=True,
+        )
 
     try:
         await bot.send_message(
@@ -128,12 +157,15 @@ async def on_topic_created(message: Message, settings: Settings, bot: Bot) -> No
 
 @router.message(F.forum_topic_edited)
 async def on_topic_edited(message: Message, settings: Settings) -> None:
-    """Sync the renamed name into topic_config.json (other fields untouched)."""
+    """Sync the renamed name / changed icon into topic_config.json (other fields untouched)."""
     if message.forum_topic_edited is None or message.message_thread_id is None:
         return
     new_name = message.forum_topic_edited.name
-    if new_name is None:
-        # icon-only edit — name didn't change
+    # Icon picked through the Telegram UI — mirror it into `emoji` so the
+    # config stays the source of truth and the next autoname keeps it.
+    new_emoji = normalize_emoji(topic_icon_emoji(message.forum_topic_edited.icon_custom_emoji_id))
+    if new_name is None and new_emoji is None:
+        # icon-only edit with an icon outside the known set, or nothing changed
         return
     thread_id = message.message_thread_id
     config_path = _resolve_config_path(settings)
@@ -147,9 +179,11 @@ async def on_topic_edited(message: Message, settings: Settings) -> None:
         entry = config["topics"].get(key)
         if entry is None:
             # Rename event arrived before our 'created' handler ran — register on the fly.
-            config["topics"][key] = _new_entry(new_name)
-        else:
+            entry = config["topics"][key] = _new_entry(new_name or "")
+        elif new_name is not None:
             entry["name"] = new_name
+        if new_emoji is not None:
+            entry["emoji"] = new_emoji
         _save_config(config_path, config)
 
-    logger.info("Topic thread_id=%d renamed to %r", thread_id, new_name)
+    logger.info("Topic thread_id=%d edited: name=%r emoji=%r", thread_id, new_name, new_emoji)

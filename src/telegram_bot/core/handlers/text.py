@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from aiogram import F, Router
 from aiogram.types import Message
 
+from telegram_bot.core.config import Settings
 from telegram_bot.core.handlers._dispatch import enqueue_prompt
 from telegram_bot.core.handlers.forward import ForwardBatcher, unparse_entities
 from telegram_bot.core.handlers.streaming import (
@@ -20,6 +21,8 @@ from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.providers import engine_display_name
 from telegram_bot.core.services.tmux_manager import TmuxManager
 from telegram_bot.core.services.topic_config import TopicConfig
+from telegram_bot.core.services.topic_naming import sync_topic_name_once
+from telegram_bot.core.services.topic_runtime import BotDefaults
 from telegram_bot.core.tui.routing import route_slash_command
 from telegram_bot.core.types import channel_key
 
@@ -36,6 +39,8 @@ async def handle_text(
     message_queue: MessageQueue,
     tmux_manager: TmuxManager,
     topic_config: TopicConfig,
+    settings: Settings | None = None,
+    bot_defaults: BotDefaults | None = None,
     inbox_reply_handler: Callable[[Message, MessageQueue], Awaitable[bool]] | None = None,
 ) -> None:
     # User's own messages are trusted — no sanitize_forwarded_content() needed here.
@@ -52,6 +57,16 @@ async def handle_text(
         len(text),
         message.from_user and message.from_user.id,
     )
+
+    # Catch-up rename for topics the startup pass could not reach (no tmux
+    # session → chat id unknown until a message arrives). Once per process.
+    if settings is not None and settings.topic_autoname and bot_defaults is not None:
+        await sync_topic_name_once(
+            message.bot,  # type: ignore[arg-type]
+            channel_key=key,
+            topic_config=topic_config,
+            defaults=bot_defaults,
+        )
 
     if inbox_reply_handler is not None and await inbox_reply_handler(message, message_queue):
         return

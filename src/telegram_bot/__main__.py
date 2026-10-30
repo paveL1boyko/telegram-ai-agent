@@ -37,6 +37,7 @@ from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.picker_store import PickerStore
 from telegram_bot.core.services.tmux_manager import TmuxManager
 from telegram_bot.core.services.topic_config import TopicConfig
+from telegram_bot.core.services.topic_naming import load_topic_icons, sync_all_topic_names
 from telegram_bot.core.services.topic_runtime import BotDefaults
 from telegram_bot.core.services.transcriber import Transcriber
 from telegram_bot.core.types import ChannelKey
@@ -119,7 +120,7 @@ async def _start() -> None:
         auto_approve_permission_tools=settings.auto_approve_permission_tools,
     )
     tmux_manager.wire_live_buffer(bot=bot, topic_config=topic_config)
-    tmux_manager.restore_all()
+    restored_sessions = tmux_manager.restore_all()
     tmux_manager.start_modal_watchdog()
     session_manager = SessionManager(settings, topic_config=topic_config)
     # Recovery tails deliver output typed straight into the tmux pane; the
@@ -194,10 +195,35 @@ async def _start() -> None:
     dp["tmux_manager"] = tmux_manager
     dp["picker_store"] = PickerStore()
     dp["cwd_picker_store"] = CwdPickerStore()
-    dp["bot_defaults"] = BotDefaults(
+    bot_defaults = BotDefaults(
         cwd=default_cwd,
         mcp_config=Path(settings.project_root) / ".mcp.bot.json",
     )
+    dp["bot_defaults"] = bot_defaults
+
+    async def _startup_topic_sync() -> None:
+        """One-shot reconciliation of topic names/icons with the current scheme.
+
+        Runs as a background task so a slow Telegram (flood wait on
+        editForumTopic) never delays polling startup. Chat ids are only
+        known from restored tmux sessions; topics without one are caught
+        up lazily on their first message (`sync_topic_name_once`).
+        """
+        try:
+            await load_topic_icons(bot)
+            renamed = await sync_all_topic_names(
+                bot,
+                channel_keys=restored_sessions.keys(),
+                topic_config=topic_config,
+                defaults=bot_defaults,
+            )
+            logger.info("Startup topic sync: %d topics renamed", renamed)
+        except Exception:
+            logger.warning("Startup topic sync failed", exc_info=True)
+
+    topic_sync_task: asyncio.Task[None] | None = None
+    if settings.topic_autoname:
+        topic_sync_task = asyncio.create_task(_startup_topic_sync())
 
     ensure_tmp_dir(session_manager.file_cache_dir)
     cleanup_old_tmp_files(session_manager.file_cache_dir)
@@ -220,6 +246,8 @@ async def _start() -> None:
     async def _on_shutdown() -> None:
         logger.info("Shutting down: cleaning up sessions...")
         cleanup_task.cancel()
+        if topic_sync_task is not None:
+            topic_sync_task.cancel()
         await forward_batcher.shutdown()
         await message_queue.shutdown()
         await session_manager.shutdown()
