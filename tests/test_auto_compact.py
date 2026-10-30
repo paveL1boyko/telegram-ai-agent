@@ -164,17 +164,13 @@ def _wire(
     mgr.send_direct = fake_send_direct  # type: ignore[method-assign]
     if monkeypatch is not None:
         monkeypatch.setattr(tmux_manager_module, "capture_pane", fake_capture)
-        monkeypatch.setattr(tmux_manager_module, "_AUTO_COMPACT_RESUME_POLL_SEC", 0)
         monkeypatch.setattr(tmux_manager_module, "_AUTO_COMPACT_RESUME_SETTLE_SEC", 0)
     return key, transcript, sent
 
 
-async def _drain_resume_tasks(mgr: TmuxManager) -> None:
-    if mgr._auto_compact_resume_tasks:
-        await asyncio.gather(*mgr._auto_compact_resume_tasks)
-
-
-async def test_compacts_once_when_over_default_threshold(tmp_path: Path, monkeypatch) -> None:
+async def test_compacts_and_queues_continue_when_over_default_threshold(
+    tmp_path: Path, monkeypatch
+) -> None:
     mgr = _manager(tmp_path, default_tokens=220_000)
     key, transcript, sent = _wire(
         mgr, tmp_path, [_assistant_line("a1", cached=230_000)], monkeypatch=monkeypatch
@@ -184,7 +180,9 @@ async def test_compacts_once_when_over_default_threshold(tmp_path: Path, monkeyp
         await mgr._check_channel_context(key)
         await mgr._check_channel_context(key)  # same measurement — no second /compact
 
-    assert sent == [(key, "/compact", False)]
+    # Both entries land back-to-back: /compact is a control command (no
+    # processing flag), the continue right behind it is a real turn.
+    assert sent == [(key, "/compact", False), (key, "continue", True)]
 
     # Still oversized lines keep arriving while the queued /compact waits
     # for the turn to end — they must not queue more compactions.
@@ -192,7 +190,7 @@ async def test_compacts_once_when_over_default_threshold(tmp_path: Path, monkeyp
         fh.write(_assistant_line("a2", cached=240_000) + "\n")
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
-    assert len(sent) == 1
+    assert len(sent) == 2
 
     # Once the compaction lands, a fresh oversized turn re-arms the check.
     with transcript.open("a") as fh:
@@ -200,8 +198,7 @@ async def test_compacts_once_when_over_default_threshold(tmp_path: Path, monkeyp
         fh.write(_assistant_line("a3", cached=240_000) + "\n")
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
-    assert len(sent) == 2
-    assert mgr._auto_compact_resume_tasks == set()  # idle session: nothing to resume
+    assert len(sent) == 4
 
 
 async def test_pending_gate_expires_after_deadline(tmp_path: Path, monkeypatch) -> None:
@@ -215,7 +212,7 @@ async def test_pending_gate_expires_after_deadline(tmp_path: Path, monkeypatch) 
         with transcript.open("a") as fh:
             fh.write(_assistant_line("a2", cached=240_000) + "\n")
         await mgr._check_channel_context(key)
-    assert len(sent) == 2
+    assert len(sent) == 4
 
 
 async def test_compaction_in_flight_in_pane_is_not_doubled(tmp_path: Path, monkeypatch) -> None:
@@ -263,7 +260,7 @@ async def test_topic_override_wins_over_default(tmp_path: Path, monkeypatch) -> 
     )
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
-    assert sent == [(key, "/compact", False)]
+    assert sent == [(key, "/compact", False), (key, "continue", True)]
     assert mgr.auto_compact_threshold(key) == 50_000
 
 
@@ -298,17 +295,15 @@ def test_context_tokens_reports_measurement(tmp_path: Path) -> None:
     assert mgr.context_tokens(key) == 12_345
 
 
-# --- resume after compact ---------------------------------------------------
+# --- continue queued behind the compact -------------------------------------
 
 
-async def test_busy_session_gets_continue_after_compact_boundary(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Compact fired mid-task (pane shows `esc to interrupt`): once the
-    transcript gains a compact_boundary, the continue prompt is sent as a
-    real turn (set_processing=True)."""
+async def test_busy_session_queues_continue_immediately(tmp_path: Path, monkeypatch) -> None:
+    """Compact fired mid-task (pane shows `esc to interrupt`): the continue
+    prompt is typed right behind the compact instead of waiting for the
+    compact_boundary, so CC's queue holds both entries."""
     mgr = _manager(tmp_path, default_tokens=220_000)
-    key, transcript, sent = _wire(
+    key, _transcript, sent = _wire(
         mgr,
         tmp_path,
         [_assistant_line("a1", cached=230_000)],
@@ -317,32 +312,24 @@ async def test_busy_session_gets_continue_after_compact_boundary(
     )
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
-        assert sent == [(key, "/compact", False)]
-        assert len(mgr._auto_compact_resume_tasks) == 1
-        # Simulate CC finishing the compaction.
-        await asyncio.sleep(0)
-        with transcript.open("a") as fh:
-            fh.write(COMPACT_BOUNDARY_LINE + "\n")
-        await _drain_resume_tasks(mgr)
 
     assert sent == [(key, "/compact", False), (key, "continue", True)]
 
 
-async def test_busy_via_processing_flag_also_resumes(tmp_path: Path, monkeypatch) -> None:
+async def test_idle_session_queues_continue_too(tmp_path: Path, monkeypatch) -> None:
+    """The 2026-10-30 regression: an idle session that crossed the threshold
+    between turns was compacted but never resumed — the continue is now
+    unconditional."""
     mgr = _manager(tmp_path, default_tokens=220_000)
-    key, transcript, sent = _wire(
+    key, _transcript, sent = _wire(
         mgr, tmp_path, [_assistant_line("a1", cached=230_000)], monkeypatch=monkeypatch
     )
-    mgr._is_processing[key] = True
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
-        with transcript.open("a") as fh:
-            fh.write(COMPACT_BOUNDARY_LINE + "\n")
-        await _drain_resume_tasks(mgr)
     assert [p for _, p, _ in sent] == ["/compact", "continue"]
 
 
-async def test_resume_disabled_by_empty_prompt(tmp_path: Path, monkeypatch) -> None:
+async def test_continue_disabled_by_empty_prompt(tmp_path: Path, monkeypatch) -> None:
     mgr = _manager(tmp_path, default_tokens=220_000, continue_prompt="")
     key, _transcript, sent = _wire(
         mgr,
@@ -354,24 +341,44 @@ async def test_resume_disabled_by_empty_prompt(tmp_path: Path, monkeypatch) -> N
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
     assert sent == [(key, "/compact", False)]
-    assert mgr._auto_compact_resume_tasks == set()
 
 
-async def test_resume_aborts_when_session_replaced(tmp_path: Path, monkeypatch) -> None:
-    """`/new` while waiting for the boundary: the continue prompt must not
-    land in the replacement session."""
+async def test_continue_skipped_when_compact_not_delivered(tmp_path: Path, monkeypatch) -> None:
+    """A modal-blocked `/compact` already posted its alert; queueing the
+    continue behind it would just bounce off the same modal."""
     mgr = _manager(tmp_path, default_tokens=220_000)
-    key, transcript, sent = _wire(
-        mgr,
-        tmp_path,
-        [_assistant_line("a1", cached=230_000)],
-        pane=BUSY_PANE,
-        monkeypatch=monkeypatch,
+    key, _transcript, sent = _wire(
+        mgr, tmp_path, [_assistant_line("a1", cached=230_000)], monkeypatch=monkeypatch
     )
+
+    async def failing_send_direct(channel_key, prompt, *, set_processing=True):  # type: ignore[no-untyped-def]
+        sent.append((channel_key, prompt, set_processing))
+        return False
+
+    mgr.send_direct = failing_send_direct  # type: ignore[method-assign]
     with patch.object(mgr, "_tmux_alive", return_value=True):
         await mgr._check_channel_context(key)
+    assert sent == [(key, "/compact", False)]
+
+
+async def test_continue_aborts_when_session_replaced(tmp_path: Path, monkeypatch) -> None:
+    """`/new` during the settle pause: the continue prompt must not land in
+    the replacement session."""
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, _transcript, sent = _wire(
+        mgr, tmp_path, [_assistant_line("a1", cached=230_000)], monkeypatch=monkeypatch
+    )
+    real_sleep = asyncio.sleep
+
+    async def swap_during_settle(delay: float) -> None:
+        # The settle pause is the only sleep left in the check once
+        # capture_pane and send_direct are stubbed.
         mgr._sessions[key] = _state(tmp_path)  # fresh state object
-        with transcript.open("a") as fh:
-            fh.write(COMPACT_BOUNDARY_LINE + "\n")
-        await _drain_resume_tasks(mgr)
+        await real_sleep(0)
+
+    with (
+        patch.object(mgr, "_tmux_alive", return_value=True),
+        patch.object(tmux_manager_module.asyncio, "sleep", swap_during_settle),
+    ):
+        await mgr._check_channel_context(key)
     assert sent == [(key, "/compact", False)]
