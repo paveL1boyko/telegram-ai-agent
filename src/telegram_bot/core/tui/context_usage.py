@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from telegram_bot.core.tui.transcript import is_turn_end
+
 # How much of the file tail to scan for the newest assistant line. A tool
 # result can be several hundred KB (a big file read), so one line alone can
 # push the previous assistant entry far back; 1 MB covers that with margin
@@ -89,6 +91,53 @@ def read_context_usage(transcript: Path) -> ContextUsage | None:
             line_id = str(entry.get("timestamp") or tokens)
         return ContextUsage(tokens=tokens, line_id=line_id)
     return None
+
+
+def _read_tail(transcript: Path, tail_bytes: int) -> bytes | None:
+    try:
+        size = transcript.stat().st_size
+        with transcript.open("rb") as fh:
+            if size > tail_bytes:
+                fh.seek(size - tail_bytes)
+                fh.readline()  # drop the partial first line
+            return fh.read()
+    except OSError:
+        return None
+
+
+def turn_in_progress(transcript: Path) -> bool:
+    """True when the transcript's newest conversation record leaves a turn
+    open: an assistant record that is not a turn end (`tool_use` stop, or
+    a still-streaming one), or a user record — prompt or tool_result —
+    that no assistant record has answered yet.
+
+    The pane alone cannot tell: between API-error retries CC shows neither
+    the spinner's `esc to interrupt` nor a `Retrying in` line, and the
+    in-memory processing flag does not survive a bot restart (2026-10-31:
+    both failed at once and a `/compact` + `continue` pair went in behind
+    a `/compact` already waiting in CC's queue). A user interrupt writes a
+    `[Request interrupted …]` user record and counts as idle.
+    """
+    tail = _read_tail(transcript, _TAIL_BYTES)
+    if tail is None:
+        return False
+    for raw in reversed(tail.splitlines()):
+        if b'"assistant"' not in raw and b'"user"' not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("type")
+        if kind == "assistant":
+            return not is_turn_end(entry)
+        if kind == "user":
+            message = entry.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            return not (isinstance(content, str) and content.startswith("[Request interrupted"))
+    return False
 
 
 _COMPACT_BOUNDARY = b'"compact_boundary"'

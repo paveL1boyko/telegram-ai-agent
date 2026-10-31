@@ -137,6 +137,7 @@ from telegram_bot.core.tui.context_usage import (
     compact_pending,
     last_compact_command_at,
     read_context_usage,
+    turn_in_progress,
 )
 from telegram_bot.core.tui.modal_detect import (
     capture_pane,
@@ -145,6 +146,7 @@ from telegram_bot.core.tui.modal_detect import (
     codex_prompt_visible_in_pane,
     is_modal_present,
     nessy_input_bar_content,
+    pane_has_queued_compact,
 )
 from telegram_bot.core.tui.paths import generate_session_uuid, transcript_path
 from telegram_bot.core.tui.permission_prompt import (
@@ -204,9 +206,11 @@ _AUTO_COMPACT_RESUME_SETTLE_SEC = 3.0
 
 # Pane fragments that mean a turn is running. CC's spinner line ends with
 # `esc to interrupt`; during API-error backoff it is replaced by
-# `✻ 429 {...} · Retrying in 1s · attempt 3/10`, which is just as busy —
-# the queue keeps waiting behind it.
-_PANE_BUSY_MARKERS = ("esc to interrupt", "retrying in")
+# `✻ 429 {...} · Retrying in 1s · attempt 3/10`; a queue footer only
+# exists while messages wait behind a running turn. Between retries none
+# of these may be on screen — the transcript (`turn_in_progress`) is the
+# authoritative source, the pane is a fast path.
+_PANE_BUSY_MARKERS = ("esc to interrupt", "retrying in", "press up to edit queued messages")
 
 
 def _pane_busy(pane: str) -> bool:
@@ -2721,6 +2725,12 @@ class TmuxManager:
         # pane line is older than the scan window) still shows in the pane.
         if "compacting" in pane.lower():
             return
+        if pane_has_queued_compact(pane):
+            logger.info(
+                "TUI_IO: auto-compact skipped session=%s: /compact already in the pane queue",
+                state.session_name,
+            )
+            return
         # Busy-at-trigger decides when the continue prompt may go in: CC
         # absorbs ordinary text into a running turn (`absorbed_mid_turn` in
         # the transcript) but keeps slash commands queued until it ends, so
@@ -2728,7 +2738,7 @@ class TmuxManager:
         # and the task would still stall after the compaction lands. Wait
         # for the compact_boundary in that case; an idle session has
         # nothing to absorb it and gets both entries back-to-back.
-        busy = self.is_processing(channel_key) or _pane_busy(pane)
+        busy = self.is_processing(channel_key) or _pane_busy(pane) or turn_in_progress(output_path)
         # A `/compact` queued behind this still-running turn is older than
         # the pending gate's lost-compaction window but not lost: CC runs
         # it when the turn ends, however long that takes (2026-10-31: a

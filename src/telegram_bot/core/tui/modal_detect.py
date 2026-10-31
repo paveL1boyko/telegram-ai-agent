@@ -425,6 +425,20 @@ def nessy_input_bar_content(pane: str) -> str | None:
     return _nessy_input_bar_content(pane)
 
 
+def pane_has_queued_compact(pane: str) -> bool:
+    """A `/compact` already sitting in Claude's queue or typed into the
+    input box renders as a `❯ /compact…` line (queued entries reuse the
+    input-bar glyph; executed prompts echo with a plain `>`). The
+    operator's own view of "one is already there" — a direct check the
+    auto-compact watchdog runs before anything timestamp- or
+    heuristic-based."""
+    for line in pane.splitlines():
+        m = _INPUT_BAR_MARKER_RE.match(line)
+        if m and m.group("rest").startswith("/compact"):
+            return True
+    return False
+
+
 async def capture_pane(session_name: str) -> str:
     """Read the current pane. Returns empty string on any subprocess
     failure (including a timeout) — the caller must interpret empty as

@@ -21,6 +21,7 @@ from telegram_bot.core.tui.context_usage import (
     compact_pending,
     last_compact_command_at,
     read_context_usage,
+    turn_in_progress,
 )
 
 IDLE_PANE = "────────\n  ⏵⏵ bypass permissions on\n"
@@ -47,13 +48,21 @@ COMPACT_ENQUEUE_LINE = json.dumps(
 )
 
 
-def _assistant_line(uuid: str, *, cached: int, fresh: int = 0, created: int = 0) -> str:
+def _assistant_line(
+    uuid: str,
+    *,
+    cached: int,
+    fresh: int = 0,
+    created: int = 0,
+    stop_reason: str | None = "end_turn",
+) -> str:
     return json.dumps(
         {
             "type": "assistant",
             "uuid": uuid,
             "message": {
                 "role": "assistant",
+                "stop_reason": stop_reason,
                 "usage": {
                     "input_tokens": fresh,
                     "cache_creation_input_tokens": created,
@@ -417,6 +426,81 @@ def test_pane_busy_markers() -> None:
     assert tmux_manager_module._pane_busy(BUSY_PANE) is True
     assert tmux_manager_module._pane_busy(RETRY_PANE) is True
     assert tmux_manager_module._pane_busy(IDLE_PANE) is False
+
+
+def _tool_result_line() -> str:
+    return json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "Bash:1", "content": "ok"}],
+            },
+        }
+    )
+
+
+def test_turn_in_progress_reads_the_newest_conversation_record(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(_assistant_line("a1", cached=1_000) + "\n")
+    assert turn_in_progress(transcript) is False  # text-only end_turn
+
+    with transcript.open("a") as fh:
+        fh.write(_user_line("next prompt") + "\n")
+    assert turn_in_progress(transcript) is True  # awaiting the assistant
+
+    with transcript.open("a") as fh:
+        fh.write(_assistant_line("a2", cached=1_000, stop_reason="tool_use") + "\n")
+        fh.write(_tool_result_line() + "\n")
+        fh.write(COMPACT_ENQUEUE_LINE + "\n")  # queue ops are not conversation records
+    assert turn_in_progress(transcript) is True  # tool result in, model not back yet
+
+    with transcript.open("a") as fh:
+        fh.write(_user_line("[Request interrupted by user]") + "\n")
+    assert turn_in_progress(transcript) is False
+    assert turn_in_progress(tmp_path / "missing.jsonl") is False
+
+
+async def test_turn_open_in_transcript_counts_as_busy_even_with_a_quiet_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """2026-10-31 09:48: between 429 retries the pane showed no spinner and
+    no retry line, the processing flag had been reset by a restart, and
+    the stale queued `/compact` was doubled. The open tool_use turn in
+    the transcript is the signal that survives all of that."""
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, _transcript, sent = _wire(
+        mgr,
+        tmp_path,
+        [
+            _assistant_line("a1", cached=230_000, stop_reason="tool_use"),
+            _tool_result_line(),
+            COMPACT_ENQUEUE_LINE,
+        ],
+        pane=IDLE_PANE,
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(tmux_manager_module.time, "time", lambda: ENQUEUE_UNIX + 70 * 60)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert sent == []
+
+
+async def test_compact_visible_in_pane_queue_blocks_another(tmp_path: Path, monkeypatch) -> None:
+    prompt_glyph = "\u276f"  # the input-bar / queue marker
+    pane = (
+        f"{prompt_glyph} /compact keep the qrator plan\n  drop the tool output\n\n"
+        f"{prompt_glyph} Press up to edit queued messages\n"
+    )
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, _transcript, sent = _wire(
+        mgr, tmp_path, [_assistant_line("a1", cached=230_000)], pane=pane, monkeypatch=monkeypatch
+    )
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert sent == []
+    assert tmux_manager_module.pane_has_queued_compact(IDLE_PANE) is False
+    assert tmux_manager_module._pane_busy(pane) is True
 
 
 def test_compact_boundary_supersedes_stale_usage(tmp_path: Path) -> None:
