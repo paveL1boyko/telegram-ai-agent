@@ -24,7 +24,7 @@ Runtime contract (Wave 2 TUI):
     `_safe_send_and_enter` (Wave 3 B1 fix) — capture → send-keys -l →
     poll-until-seen → pre-Enter re-capture → Enter. A modal-blocked prompt
     triggers a Telegram alert and the helper returns False; callers roll
-    back the "Thinking..." UI.
+    back the per-turn UI (command acknowledgement, live buffer).
   - `clear_context` kills the tmux session and respawns CC with a fresh
     UUID4 passed via `--session-id`.
   - `switch_session` returns bool — False when the target transcript is
@@ -1247,7 +1247,7 @@ class TmuxManager:
         Returns True iff Enter was sent cleanly. On any failure path it
         posts a Telegram modal alert and returns False. Callers (send_direct
         and send_stream) must react to False — send_direct rolls back its
-        "Thinking..." placeholder; send_stream must not start the tail
+        command acknowledgement and live buffer; send_stream must not start the tail
         loop (CC would never emit a result_message, the tail would idle
         until cancel).
 
@@ -1599,8 +1599,8 @@ class TmuxManager:
         landed before sending Enter. Returns True iff Enter was sent.
 
         Return value drives caller cleanup: on False, the caller must
-        delete the "Thinking..." placeholder and close any LiveStatusBuffer
-        it spawned — otherwise both hang forever with no signal back to
+        delete any command acknowledgement and close any LiveStatusBuffer
+        it spawned — otherwise they hang forever with no signal back to
         the user.
 
         `set_processing=False` is for control commands (an in-TUI `/model`
@@ -1909,8 +1909,9 @@ class TmuxManager:
             if asyncio.iscoroutine(ret):
                 await ret
             if event.type == "result_message":
-                # Clear after Telegram send completes — avoids starting a new
-                # "Thinking..." indicator while the result is still mid-post.
+                # Clear after Telegram send completes — the next prompt must
+                # not be treated as idle-dispatched while the result is still
+                # mid-post.
                 self._is_processing[channel_key] = False
 
         try:

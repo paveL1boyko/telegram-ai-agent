@@ -6,7 +6,7 @@ Two languages: "en" (default) and "ru". Keys group into:
             (forwarded media labels, voice transcription markers, etc.)
 - tool.*  — tool-status messages shown while CC executes a tool
 
-Use `t("ui.thinking")` for static strings or `t("ui.tmux_failed", exc=err)`
+Use `t("ui.turn_done")` for static strings or `t("ui.tmux_failed", exc=err)`
 for templates with placeholders. Missing keys fall back to English, then
 to the key itself if not found in either language.
 
@@ -27,7 +27,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.start_welcome": (
             "Hi! I'll forward your messages to Claude Code. Just send me anything."
         ),
-        "ui.thinking": "⏳ Thinking...",
         # Turn-done marker. Never emoji-only: Telegram renders bare-emoji
         # messages huge; trailing text keeps it a normal-sized line.
         "ui.turn_done": "✅ Done",
@@ -347,7 +346,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.start_welcome": (
             "Привет! Я перешлю твои сообщения в Claude Code. Просто отправь мне сообщение."
         ),
-        "ui.thinking": "⏳ Думаю...",
         # Turn-done marker. Never emoji-only: Telegram renders bare-emoji
         # messages huge; trailing text keeps it a normal-sized line.
         "ui.turn_done": "✅ Готово",

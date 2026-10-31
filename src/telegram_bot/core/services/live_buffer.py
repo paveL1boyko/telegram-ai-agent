@@ -9,8 +9,7 @@ rotates to a fresh message when the 4096-char limit looms.
 
 Lifecycle:
 
-    buf = LiveStatusBuffer(bot=..., chat_id=..., thread_id=...,
-                           initial_message_id=...)
+    buf = LiveStatusBuffer(bot=..., chat_id=..., thread_id=...)
     await buf.append("🔧 Read: foo.py")
     await buf.append("🤖 researcher → scanning")
     ...
@@ -19,6 +18,11 @@ Lifecycle:
 Rendering: all lines but the last are wrapped in an expandable
 blockquote (collapses to a one-line preview in the chat); the latest
 line stays outside the quote so current activity is always visible.
+
+The first page is posted lazily, with the first flush that has lines to
+show: a turn without tool calls then leaves no progress message at all.
+Pass `initial_message_id` to adopt an already-sent message as the first
+page instead.
 
 Threading model:
 
@@ -68,7 +72,7 @@ class LiveStatusBuffer:
         bot: Bot,
         chat_id: int,
         thread_id: int | None,
-        initial_message_id: int,
+        initial_message_id: int | None = None,
         throttle_sec: float = _DEFAULT_THROTTLE_SEC,
         max_chars: int = _MAX_CHARS,
         rotate_min_interval_sec: float = _ROTATE_MIN_INTERVAL_SEC,
@@ -77,7 +81,7 @@ class LiveStatusBuffer:
         self._bot = bot
         self._chat_id = chat_id
         self._thread_id = thread_id
-        self._current_message_id = initial_message_id
+        self._current_message_id: int | None = initial_message_id
         self._throttle_sec = throttle_sec
         self._max_chars = max_chars
         self._rotate_min_interval = rotate_min_interval_sec
@@ -90,7 +94,8 @@ class LiveStatusBuffer:
         self._lock = asyncio.Lock()
         self._last_rotate: float = time.monotonic()
         self._last_edit_text: str = ""  # skip no-op edits
-        self._message_ids: list[int] = [initial_message_id]  # all pages we've posted
+        # all pages we've posted
+        self._message_ids: list[int] = [] if initial_message_id is None else [initial_message_id]
 
         self._worker: asyncio.Task[None] | None = asyncio.create_task(self._worker_loop())
 
@@ -109,14 +114,15 @@ class LiveStatusBuffer:
     async def finalize(self, text: str) -> bool:
         """Turn an untouched placeholder into the turn-completion marker.
 
-        A pure-text turn (no tool calls) never appends a line, so the
+        A pure-text turn (no tool calls) never appends a line, so an adopted
         placeholder would otherwise hang as "Thinking..." above the finished
         answer — reading as a stuck stream. Returns True iff the buffer had
         no lines and its message was edited to `text`; the caller then skips
         sending the marker as a separate message. A buffer with status
-        history keeps its page untouched and gets the marker separately.
+        history keeps its page untouched and gets the marker separately, as
+        does a lazy buffer that never posted a page.
         """
-        if self._closed or self._lines:
+        if self._closed or self._lines or self._current_message_id is None:
             return False
         await self.close()  # stops the worker first, so it can't re-edit after us
         await self._edit(self._current_message_id, text)
@@ -177,10 +183,28 @@ class LiveStatusBuffer:
         async with self._lock:
             if not self._dirty and not final:
                 return
+            if self._current_message_id is None and not self._lines:
+                return  # lazy first page: nothing to show yet
             text = self._render()
             self._dirty = False
 
         if text == self._last_edit_text:
+            return
+
+        if self._current_message_id is None:
+            if len(text) > self._max_chars:
+                async with self._lock:
+                    while len(self._lines) > 1 and len(self._render()) > self._max_chars:
+                        self._lines.pop(0)
+                    text = self._render()
+            new_id = await self._send_new_page(text)
+            if new_id is None:
+                async with self._lock:
+                    self._dirty = True  # retry on the next tick
+                return
+            self._current_message_id = new_id
+            self._message_ids.append(new_id)
+            self._last_edit_text = text
             return
 
         if len(text) > self._max_chars:
@@ -241,7 +265,7 @@ class LiveStatusBuffer:
         self._last_rotate = now
 
         # Send a fresh placeholder for the continuation page.
-        new_id = await self._send_new_page()
+        new_id = await self._send_new_page(_HEADER_CONTINUED.strip())
         if new_id is None:
             # If we can't post the new page, keep trimming on the old one; the
             # alternative (giving up) leaves the user with a frozen buffer.
@@ -286,11 +310,11 @@ class LiveStatusBuffer:
                 e,
             )
 
-    async def _send_new_page(self) -> int | None:
+    async def _send_new_page(self, text: str) -> int | None:
         try:
             sent = await self._bot.send_message(
                 chat_id=self._chat_id,
-                text=_HEADER_CONTINUED.strip() or "…",
+                text=text or "…",
                 message_thread_id=self._thread_id,
                 disable_notification=True,
                 parse_mode=ParseMode.HTML,

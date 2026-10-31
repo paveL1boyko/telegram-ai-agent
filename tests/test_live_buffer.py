@@ -141,3 +141,63 @@ def test_finalize_after_close_returns_false() -> None:
     bot, ok = asyncio.run(run())
     assert ok is False
     assert all(text != "✅ Done" for _, text in bot.edits)
+
+
+# --- lazy first page (no "Thinking..." placeholder) -------------------------
+
+
+class _SendingBot(_RecordingBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[tuple[int | None, str]] = []
+        self._next_id = 100
+
+    async def send_message(
+        self, *, chat_id: int, text: str, message_thread_id: int | None = None, **kwargs: object
+    ) -> object:
+        self.sent.append((message_thread_id, text))
+        self._next_id += 1
+        return type("Sent", (), {"message_id": self._next_id})()
+
+
+def _lazy_buffer(bot: _SendingBot) -> LiveStatusBuffer:
+    return LiveStatusBuffer(bot=bot, chat_id=1, thread_id=7, throttle_sec=0.01)  # type: ignore[arg-type]
+
+
+def test_lazy_buffer_posts_nothing_without_lines() -> None:
+    """A pure-text turn leaves no progress message behind at all."""
+
+    async def run() -> tuple[_SendingBot, bool, list[int]]:
+        bot = _SendingBot()
+        buf = _lazy_buffer(bot)
+        await asyncio.sleep(0.05)  # several worker ticks with nothing to show
+        ok = await buf.finalize("✅ Done")  # nothing to finalize → caller sends the marker
+        await buf.close()
+        return bot, ok, buf.message_ids
+
+    bot, ok, ids = asyncio.run(run())
+    assert bot.sent == []
+    assert bot.edits == []
+    assert ok is False
+    assert ids == []
+
+
+def test_lazy_buffer_first_flush_posts_the_page_with_content() -> None:
+    async def run() -> tuple[_SendingBot, list[int]]:
+        bot = _SendingBot()
+        buf = _lazy_buffer(bot)
+        await buf.append("🔧 Read: a.py")
+        await asyncio.sleep(0.05)
+        await buf.append("✏️ Editing b.py")
+        await buf.close()
+        return bot, buf.message_ids
+
+    bot, ids = asyncio.run(run())
+    # One page, posted straight with the first line, then edited in place.
+    assert len(bot.sent) == 1
+    thread_id, first_text = bot.sent[0]
+    assert thread_id == 7
+    assert _strip_ts(first_text) == "🔧 Read: a.py"
+    assert ids == [101]
+    assert bot.edits and bot.edits[-1][0] == 101
+    assert _strip_ts(bot.edits[-1][1]).endswith("✏️ Editing b.py")

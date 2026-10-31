@@ -129,11 +129,25 @@ def _turn_reply_keyboard(message: Message) -> ReplyKeyboardMarkup | None:
     layout change in `topic_keyboard` only reaches the client with the next
     message that carries the markup. The subprocess path attaches it to the
     final answer; the tmux path has no final answer (results stream from
-    the tail), so the "Thinking..." placeholder carries it instead — it is
-    the one message every turn sends. Private chats get none: the buttons
+    the tail), so the ✅ turn-done marker carries it instead — it is the
+    one message every tmux turn sends. Private chats get none: the buttons
     would route to the General topic.
     """
     return topic_keyboard() if message.chat.type == ChatType.SUPERGROUP else None
+
+
+def _turn_placeholder_text(prompt: str) -> str | None:
+    """Text of the acknowledgement posted when a prompt is dispatched.
+
+    Only slash commands get one ("⚙️ Running /compact..."): they produce no
+    ✅ turn-done marker, so the acknowledgement is the only sign the command
+    went in. Plain prompts get nothing — the user just sent the message, a
+    "Thinking..." line under it only adds noise to the topic; progress
+    shows up with the first tool call (live buffer) and the ✅ marker.
+    """
+    if not prompt.startswith("/"):
+        return None
+    return t("ui.running_command", command=prompt.split()[0])
 
 
 async def send_to_tmux_if_active(
@@ -147,10 +161,10 @@ async def send_to_tmux_if_active(
     Returns True if dispatched to tmux (caller should return immediately),
     False if not in active tmux tail (caller should enqueue normally).
 
-    Always creates a new "Thinking..." placeholder and rotates the live
-    buffer, even when CC is already processing — so status events for
-    subsequent prompts appear in a fresh message rather than the original.
-    N rapid messages produce N placeholders; each idles until CC reaches it.
+    Always rotates the live buffer, even when CC is already processing — so
+    status events for subsequent prompts appear in a fresh message rather
+    than the original. N rapid messages produce N buffers; each idles until
+    CC reaches it, and a buffer that never sees a status line never posts.
     """
     msg_id = source_msg.message_id
     if not (tmux_manager.is_active(key) and tmux_manager.is_tailing(key)):
@@ -175,11 +189,14 @@ async def send_to_tmux_if_active(
         key,
     )
 
-    cmd = prompt.split()[0] if prompt.startswith("/") else None
-    thinking_text = t("ui.running_command", command=cmd) if cmd else t("ui.thinking")
-    thinking_msg = await source_msg.answer(
-        thinking_text, disable_notification=True, reply_markup=_turn_reply_keyboard(source_msg)
-    )
+    placeholder_text = _turn_placeholder_text(prompt)
+    placeholder_msg: Message | None = None
+    if placeholder_text is not None:
+        placeholder_msg = await source_msg.answer(
+            placeholder_text,
+            disable_notification=True,
+            reply_markup=_turn_reply_keyboard(source_msg),
+        )
 
     if stream_mode == "live" and tmux_manager.live_buffer_available():
         bot = tmux_manager.get_live_bot()
@@ -187,23 +204,23 @@ async def send_to_tmux_if_active(
             bot=bot,  # type: ignore[arg-type]
             chat_id=source_msg.chat.id,
             thread_id=key[1],
-            initial_message_id=thinking_msg.message_id,
-            header_text=thinking_text,
+            initial_message_id=placeholder_msg.message_id if placeholder_msg else None,
+            header_text=placeholder_text or "",
         )
-        # set_buffer closes the previous buffer atomically, covering the prior thinking page.
+        # set_buffer closes the previous buffer atomically, covering the prior page.
         await tmux_manager.set_buffer(key, new_buffer)
 
     delivered = await tmux_manager.send_direct(key, prompt)
     if not delivered:
-        # Modal-blocked or send-keys failure: the thinking placeholder is
-        # a lie (CC never received the prompt). Roll back both the
-        # placeholder and the LiveStatusBuffer so the user doesn't see
-        # an eternal "Thinking..." with no response. send_direct has
-        # already posted a modal alert with the pane snapshot; after
-        # the user dismisses the modal and resends, a fresh placeholder
-        # spawns for that next attempt.
-        with contextlib.suppress(TelegramAPIError):
-            await thinking_msg.delete()
+        # Modal-blocked or send-keys failure: the acknowledgement is a lie
+        # (CC never received the prompt). Roll back both it and the
+        # LiveStatusBuffer so the user doesn't see an eternal "Running
+        # /cmd..." with no response. send_direct has already posted a
+        # modal alert with the pane snapshot; after the user dismisses the
+        # modal and resends, the next attempt starts clean.
+        if placeholder_msg is not None:
+            with contextlib.suppress(TelegramAPIError):
+                await placeholder_msg.delete()
         await tmux_manager.close_buffer(key)
     return True
 
@@ -579,15 +596,16 @@ async def send_streaming_response(
 ) -> None:
     """Send prompt to CC with streaming and deliver response to user.
 
-    stream_mode controls what reaches Telegram between the thinking placeholder
-    and the final result:
+    stream_mode controls what reaches Telegram before the final result:
       verbose — every status event ships as its own silent message (legacy).
-      minimal — status events dropped; only the thinking + results stay,
-                which is what project topics want so agent-team chatter
-                doesn't hit the SendMessage flood limit.
+      minimal — status events dropped; only the results stay, which is what
+                project topics want so agent-team chatter doesn't hit the
+                SendMessage flood limit.
       live    — status events are appended to a single editable
-                ``LiveStatusBuffer`` message; falls back to verbose behaviour
-                for status when no buffer is available.
+                ``LiveStatusBuffer`` message, posted with the first status
+                event; falls back to verbose behaviour for status when no
+                buffer is available.
+    Slash commands additionally get a "Running /cmd..." acknowledgement.
     All message IDs are still recorded for reply-to-resume.
     """
     stream_mode = _resolve_stream_mode(topic_config, channel_key)
@@ -601,12 +619,16 @@ async def send_streaming_response(
 
     sent_message_ids: list[int] = []
 
-    cmd = prompt.split()[0] if prompt.startswith("/") else None
-    thinking_text = t("ui.running_command", command=cmd) if cmd else t("ui.thinking")
-    thinking_msg = await message.answer(
-        thinking_text, disable_notification=True, reply_markup=_turn_reply_keyboard(message)
-    )
-    sent_message_ids.append(thinking_msg.message_id)
+    placeholder_text = _turn_placeholder_text(prompt)
+    placeholder_id: int | None = None
+    if placeholder_text is not None:
+        placeholder_msg = await message.answer(
+            placeholder_text,
+            disable_notification=True,
+            reply_markup=_turn_reply_keyboard(message),
+        )
+        placeholder_id = placeholder_msg.message_id
+        sent_message_ids.append(placeholder_id)
 
     used_tmux = tmux_manager is not None and tmux_manager.is_active(channel_key)
 
@@ -624,8 +646,8 @@ async def send_streaming_response(
             bot=message.bot,
             chat_id=message.chat.id,
             thread_id=channel_key[1],
-            initial_message_id=thinking_msg.message_id,
-            header_text=thinking_text,
+            initial_message_id=placeholder_id,
+            header_text=placeholder_text or "",
         )
     if (
         stream_mode == "live"
@@ -639,8 +661,8 @@ async def send_streaming_response(
             bot=bot,  # type: ignore[arg-type]
             chat_id=message.chat.id,
             thread_id=channel_key[1],
-            initial_message_id=thinking_msg.message_id,
-            header_text=thinking_text,
+            initial_message_id=placeholder_id,
+            header_text=placeholder_text or "",
         )
         await tmux_manager.set_buffer(channel_key, tmux_buffer)
 
@@ -702,11 +724,12 @@ async def send_streaming_response(
         # Telegram renders bare-emoji messages huge, the trailing word
         # keeps the line normal-sized.
         if event.type == "result" and ctx.used_tmux:
-            # A pure-text turn never appended a status line, so the live
-            # placeholder still says "Thinking..." — finalize it into the ✅
-            # marker itself instead of leaving a stale placeholder above the
-            # answer. A buffer with status history keeps its page and gets
-            # the marker as a separate message.
+            # A command acknowledgement ("Running /cmd...") that never got
+            # a status line is finalized into the ✅ marker itself instead
+            # of hanging above the answer. A buffer with status history —
+            # or a lazy one that never posted — gets the marker as a
+            # separate message, which also carries the reply keyboard (see
+            # _turn_reply_keyboard).
             finalized = False
             if ctx.stream_mode == "live" and ctx.tmux_manager is not None:
                 raw_buf = ctx.tmux_manager.get_buffer(ctx.channel_key)
@@ -722,7 +745,9 @@ async def send_streaming_response(
                         )
             if not finalized:
                 try:
-                    await ctx.message.answer(t("ui.turn_done"))
+                    await ctx.message.answer(
+                        t("ui.turn_done"), reply_markup=_turn_reply_keyboard(ctx.message)
+                    )
                 except Exception:
                     logger.warning(
                         "turn-done marker send failed on channel %s",
@@ -846,7 +871,7 @@ def build_recovery_on_event_factory(
     backlog dump (the 2026-10-26 "/compact replays everything" bug).
 
     Delivery rules mirror send_streaming_response, minus the pieces that need
-    a user message (thinking placeholder, final-response keyboard):
+    a user message (command acknowledgement, reply keyboard):
     text/result_message → formatted chunks; status → live buffer when one is
     active, silent message in verbose mode, dropped in minimal mode.
     """
@@ -864,8 +889,8 @@ def build_recovery_on_event_factory(
             # Turn-completion sentinel (synthesized on stop_reason=end_turn —
             # see tui/transcript.py): same ✅ completion signal as the
             # user-message path in send_streaming_response, including the
-            # empty-placeholder finalize (a stale "Thinking..." reads as a
-            # stuck stream).
+            # untouched-acknowledgement finalize (a stale "Running /cmd..."
+            # reads as a stuck stream).
             if event.type == "result":
                 if stream_mode == "live":
                     raw_buf = tmux_manager.get_buffer(channel_key)
