@@ -135,6 +135,7 @@ from telegram_bot.core.tui.capture import await_prompt_ready
 from telegram_bot.core.tui.context_usage import (
     compact_boundary_since,
     compact_pending,
+    last_compact_command_at,
     read_context_usage,
 )
 from telegram_bot.core.tui.modal_detect import (
@@ -200,6 +201,18 @@ _PERMISSION_ENTER_ATTEMPTS = 3
 _AUTO_COMPACT_RESUME_POLL_SEC = 5.0
 _AUTO_COMPACT_RESUME_DEADLINE_SEC = 30 * 60
 _AUTO_COMPACT_RESUME_SETTLE_SEC = 3.0
+
+# Pane fragments that mean a turn is running. CC's spinner line ends with
+# `esc to interrupt`; during API-error backoff it is replaced by
+# `✻ 429 {...} · Retrying in 1s · attempt 3/10`, which is just as busy —
+# the queue keeps waiting behind it.
+_PANE_BUSY_MARKERS = ("esc to interrupt", "retrying in")
+
+
+def _pane_busy(pane: str) -> bool:
+    lowered = pane.lower()
+    return any(marker in lowered for marker in _PANE_BUSY_MARKERS)
+
 
 # How often the activity watchdog stats each session's transcript for growth
 # beyond the delivered offset. 10s keeps tmux-typed turns near-realtime in
@@ -338,6 +351,7 @@ class TmuxManager:
         self._auto_compact_task: asyncio.Task[None] | None = None
         self._auto_compact_default_tokens = 0
         self._auto_compact_continue_prompt = ""
+        self._auto_compact_min_interval_sec = 0.0
         self._auto_compact_seen: dict[ChannelKey, str] = {}
         self._auto_compact_pending: dict[ChannelKey, tuple[int, float]] = {}
         # Strong refs to in-flight `_resume_after_compact` tasks (asyncio
@@ -2603,7 +2617,12 @@ class TmuxManager:
     # --- Auto-compact watchdog ---
 
     def start_auto_compact_watchdog(
-        self, *, default_tokens: int, interval_sec: float, continue_prompt: str = ""
+        self,
+        *,
+        default_tokens: int,
+        interval_sec: float,
+        continue_prompt: str = "",
+        min_interval_sec: float = 0.0,
     ) -> None:
         """Launch the background task that compacts oversized sessions.
 
@@ -2616,11 +2635,15 @@ class TmuxManager:
         after the compaction: typed right behind the compact on an idle
         session, or once the compact_boundary lands on a busy one (CC
         absorbs plain text into a running turn, see `_check_channel_context`).
-        `default_tokens=0` with no topic overrides makes the loop a no-op.
-        Idempotent.
+        `min_interval_sec` is the floor between two compactions of one
+        session, counted from the newest `/compact` in its transcript
+        whoever typed it — the backstop for whatever the pending gate
+        misses. `default_tokens=0` with no topic overrides makes the loop a
+        no-op. Idempotent.
         """
         self._auto_compact_default_tokens = max(0, default_tokens)
         self._auto_compact_continue_prompt = continue_prompt.strip()
+        self._auto_compact_min_interval_sec = max(0.0, min_interval_sec)
         if self._auto_compact_task is not None:
             return
         self._auto_compact_task = asyncio.create_task(self._auto_compact_loop(interval_sec))
@@ -2681,6 +2704,18 @@ class TmuxManager:
             return
         if self._auto_compact_seen.get(channel_key) == usage.line_id:
             return  # already compacted on this measurement; waiting for a new turn
+        last_compact = last_compact_command_at(output_path)
+        if (
+            last_compact is not None
+            and time.time() - last_compact < self._auto_compact_min_interval_sec
+        ):
+            logger.info(
+                "TUI_IO: auto-compact skipped session=%s tokens=%d: last /compact %.0fs ago",
+                state.session_name,
+                usage.tokens,
+                time.time() - last_compact,
+            )
+            return
         pane = await capture_pane(state.session_name)
         # A compaction already running (transcript gate missed it, e.g. the
         # pane line is older than the scan window) still shows in the pane.
@@ -2693,7 +2728,17 @@ class TmuxManager:
         # and the task would still stall after the compaction lands. Wait
         # for the compact_boundary in that case; an idle session has
         # nothing to absorb it and gets both entries back-to-back.
-        busy = self.is_processing(channel_key) or "esc to interrupt" in pane.lower()
+        busy = self.is_processing(channel_key) or _pane_busy(pane)
+        # A `/compact` queued behind this still-running turn is older than
+        # the pending gate's lost-compaction window but not lost: CC runs
+        # it when the turn ends, however long that takes (2026-10-31: a
+        # 48-minute 429-retry turn outlived the 45-minute window).
+        if busy and compact_pending(output_path, max_age_sec=None):
+            logger.info(
+                "TUI_IO: auto-compact skipped session=%s: /compact still queued behind a turn",
+                state.session_name,
+            )
+            return
         # Mark before sending: a modal-blocked send already posts its own
         # alert, and retrying every tick would only spam it. The next
         # assistant turn produces a new line_id and re-arms the check.

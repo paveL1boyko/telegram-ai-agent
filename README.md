@@ -362,7 +362,10 @@ still exists as a legacy alias, but `/clear` is the command shown in the menu.
   one (the CLI folds plain text into a running turn, so an earlier continue
   would be swallowed). Empty = compact only. A `/compact` that is still
   pending in the transcript — queued by a previous bot process or typed by
-  hand — blocks another automatic one until it finishes.
+  hand — blocks another automatic one until it finishes, and automatic
+  compactions of one session are at least `AUTO_COMPACT_MIN_INTERVAL_SEC`
+  (default 3600 s) apart, counted from the newest `/compact` whoever typed
+  it.
 - `/language`: show or switch UI language, for example `/language ru`.
 - `/uimode`: forum topics only; choose `tmux` or `subprocess`. Switching from
   `tmux` to `subprocess` stops the active tmux session.

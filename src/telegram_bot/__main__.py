@@ -138,6 +138,7 @@ async def _start() -> None:
         default_tokens=settings.auto_compact_tokens,
         interval_sec=settings.auto_compact_check_sec,
         continue_prompt=settings.auto_compact_continue_prompt,
+        min_interval_sec=settings.auto_compact_min_interval_sec,
     )
     transcriber = Transcriber(settings)
     forward_batcher = ForwardBatcher(bot=bot)

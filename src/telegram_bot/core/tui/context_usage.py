@@ -16,6 +16,7 @@ transcripts have no comparable field and report None.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -137,20 +138,15 @@ _COMPACT_SCAN_BYTES = 8 * 1024 * 1024
 # A `/compact` older than this without a boundary is treated as lost
 # (CC crashed mid-compaction, the queued command was edited away) rather
 # than as "still running" — otherwise the watchdog would never fire again
-# on that session.
+# on that session. Only meaningful for an idle session: a command queued
+# behind a running turn is waiting, not lost, however old it is.
 _MAX_PENDING_COMPACT_SEC = 45 * 60
 
 
-def compact_pending(transcript: Path, now: float | None = None) -> bool:
-    """True when the transcript's newest compaction marker is a `/compact`
-    that has not produced its `compact_boundary` yet.
-
-    Read from the transcript, not from memory, so it survives a bot
-    restart and also sees compactions typed by hand into the pane — both
-    were behind the 2026-10-30 double compaction: a reload wiped the
-    in-process gate and the next watchdog tick queued a second `/compact`
-    behind the still-pending first one. `now` is unix time for tests.
-    """
+def _compact_commands_newest_first(transcript: Path) -> Iterator[tuple[bytes, bool]]:
+    """Yield `(raw_line, is_boundary)` for compaction markers in the
+    transcript tail, newest first: `compact_boundary` system lines and
+    queued or submitted `/compact` commands."""
     try:
         size = transcript.stat().st_size
         with transcript.open("rb") as fh:
@@ -159,11 +155,11 @@ def compact_pending(transcript: Path, now: float | None = None) -> bool:
                 fh.readline()  # drop the partial first line
             tail = fh.read()
     except OSError:
-        return False
+        return
     for raw in reversed(tail.splitlines()):
         if _COMPACT_BOUNDARY in raw:
             if _parse_compact_boundary(raw) is not None:
-                return False  # boundary is newer than any pending command
+                yield raw, True
             continue
         if b"/compact" not in raw:
             continue
@@ -171,37 +167,86 @@ def compact_pending(transcript: Path, now: float | None = None) -> bool:
             entry = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
-        if not isinstance(entry, dict):
-            continue
-        if not _is_compact_command(entry):
-            continue
-        return _is_fresh(entry, now)
+        if isinstance(entry, dict) and _is_compact_command(entry):
+            yield raw, False
+
+
+def compact_pending(
+    transcript: Path,
+    now: float | None = None,
+    max_age_sec: float | None = _MAX_PENDING_COMPACT_SEC,
+) -> bool:
+    """True when the transcript's newest compaction marker is a `/compact`
+    that has not produced its `compact_boundary` yet.
+
+    Read from the transcript, not from memory, so it survives a bot
+    restart and also sees compactions typed by hand into the pane — both
+    were behind the 2026-10-30 double compaction: a reload wiped the
+    in-process gate and the next watchdog tick queued a second `/compact`
+    behind the still-pending first one. `now` is unix time for tests;
+    `max_age_sec=None` disables the lost-compaction expiry (for a session
+    whose turn is still running, so the queued command cannot have been
+    lost yet — the 2026-10-31 double run was a 48-minute turn outliving
+    the 45-minute window).
+    """
+    for raw, is_boundary in _compact_commands_newest_first(transcript):
+        if is_boundary:
+            return False  # boundary is newer than any pending command
+        if max_age_sec is None:
+            return True
+        return _is_fresh(json.loads(raw), now, max_age_sec)
     return False
+
+
+def last_compact_command_at(transcript: Path) -> float | None:
+    """Unix time of the newest `/compact` in the transcript tail — queued
+    or submitted, by the bot or by hand, finished or not. Backs the
+    minimum spacing between automatic compactions: whatever the pending
+    gate misses (an edited queue, a lost boundary), two compactions
+    minutes apart are never what the operator wants."""
+    for raw, is_boundary in _compact_commands_newest_first(transcript):
+        if is_boundary:
+            continue
+        return _timestamp_of(json.loads(raw))
+    return None
+
+
+def _compact_text(content: object) -> bool:
+    """`/compact` on its own or with custom instructions (`/compact <focus>`)."""
+    return isinstance(content, str) and (
+        content == "/compact" or content.startswith(("/compact ", "/compact\n"))
+    )
 
 
 def _is_compact_command(entry: dict[str, object]) -> bool:
     """A queued or submitted `/compact` — both shapes CC writes."""
     if entry.get("type") == "queue-operation" and entry.get("operation") == "enqueue":
-        return entry.get("content") == "/compact"
+        return _compact_text(entry.get("content"))
     if entry.get("type") == "user":
         message = entry.get("message")
         if not isinstance(message, dict):
             return False
         content = message.get("content")
-        if content == "/compact":
+        if _compact_text(content):
             return True
         return isinstance(content, list) and any(
-            isinstance(b, dict) and b.get("text") == "/compact" for b in content
+            isinstance(b, dict) and _compact_text(b.get("text")) for b in content
         )
     return False
 
 
-def _is_fresh(entry: dict[str, object], now: float | None) -> bool:
+def _timestamp_of(entry: dict[str, object]) -> float | None:
     stamp = entry.get("timestamp")
-    if not isinstance(stamp, str) or now is None:
-        return True
+    if not isinstance(stamp, str):
+        return None
     try:
-        written = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
     except ValueError:
+        return None
+
+
+def _is_fresh(entry: dict[str, object], now: float | None, max_age_sec: float) -> bool:
+    written = _timestamp_of(entry)
+    if written is None or now is None:
         return True
-    return now - written < _MAX_PENDING_COMPACT_SEC
+    return now - written < max_age_sec

@@ -19,11 +19,14 @@ from telegram_bot.core.services.tmux_state import TmuxSessionState
 from telegram_bot.core.tui.context_usage import (
     compact_boundary_since,
     compact_pending,
+    last_compact_command_at,
     read_context_usage,
 )
 
 IDLE_PANE = "────────\n  ⏵⏵ bypass permissions on\n"
 BUSY_PANE = "⏺ Working on it…\n  esc to interrupt\n"
+# API backoff replaces the spinner line — no "esc to interrupt", still busy.
+RETRY_PANE = '✻ 429 {"error":"rate limit exceeded"} · Retrying in 1s · attempt 3/10\n'
 COMPACT_BOUNDARY_LINE = json.dumps(
     {
         "type": "system",
@@ -150,6 +153,39 @@ def test_compact_pending_sees_a_submitted_and_a_stale_command(tmp_path: Path) ->
     assert compact_pending(transcript, now=ENQUEUE_UNIX) is True
     # Older than the "lost compaction" window → treat as dead, not pending.
     assert compact_pending(transcript, now=ENQUEUE_UNIX + 60 * 60) is False
+    # ...unless the caller knows the turn it is queued behind is still running.
+    assert compact_pending(transcript, now=ENQUEUE_UNIX + 60 * 60, max_age_sec=None) is True
+
+
+def test_compact_with_instructions_counts_as_a_compact(tmp_path: Path) -> None:
+    """2026-10-31: the operator replaced the queued pair with
+    `/compact <what to keep>` by hand; the gate must see that one too."""
+    transcript = tmp_path / "t.jsonl"
+    enqueue = json.dumps(
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "timestamp": ENQUEUE_TS,
+            "content": "/compact keep the qrator plan, drop the tool output",
+        }
+    )
+    transcript.write_text(enqueue + "\n")
+    assert compact_pending(transcript, now=ENQUEUE_UNIX + 60) is True
+    assert last_compact_command_at(transcript) == ENQUEUE_UNIX
+    # `/compactor` or prose mentioning the command is not a compaction.
+    transcript.write_text(
+        json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "/compactor"})
+        + "\n"
+    )
+    assert compact_pending(transcript, now=ENQUEUE_UNIX) is False
+    assert last_compact_command_at(transcript) is None
+
+
+def test_last_compact_command_survives_its_boundary(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(COMPACT_ENQUEUE_LINE + "\n" + COMPACT_BOUNDARY_LINE + "\n")
+    assert compact_pending(transcript, now=ENQUEUE_UNIX) is False
+    assert last_compact_command_at(transcript) == ENQUEUE_UNIX
 
 
 # --- _check_channel_context -------------------------------------------------
@@ -161,10 +197,12 @@ def _manager(
     default_tokens: int,
     override: int | None = None,
     continue_prompt: str = "continue",
+    min_interval_sec: float = 0.0,
 ) -> TmuxManager:
     mgr = TmuxManager(sessions_dir=tmp_path / "tmux_sessions")
     mgr._auto_compact_default_tokens = default_tokens
     mgr._auto_compact_continue_prompt = continue_prompt
+    mgr._auto_compact_min_interval_sec = min_interval_sec
     mgr._topic_config = SimpleNamespace(
         get_topic=lambda thread_id: SimpleNamespace(auto_compact_tokens=override)
     )
@@ -316,6 +354,69 @@ async def test_pending_compact_in_transcript_survives_restart(tmp_path: Path, mo
         await mgr._check_channel_context(key)
     assert [p for _, p, _ in sent] == ["/compact"]
     await _cancel_resume_tasks(mgr)  # busy pane → a boundary waiter was spawned
+
+
+async def test_stale_queued_compact_behind_a_running_turn_is_not_doubled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """2026-10-31: a  sat 48 minutes in CC's queue behind a turn
+    stuck in 429 retries; the 45-minute lost-compaction window expired and
+    the watchdog queued a second one. While the pane is busy the queued
+    command is waiting, not lost."""
+    mgr = _manager(tmp_path, default_tokens=220_000)
+    key, _transcript, sent = _wire(
+        mgr,
+        tmp_path,
+        [_assistant_line("a1", cached=230_000), COMPACT_ENQUEUE_LINE],
+        pane=RETRY_PANE,
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(tmux_manager_module.time, "time", lambda: ENQUEUE_UNIX + 48 * 60)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert sent == []
+
+    # Idle pane with the same stale command: the queue would have drained,
+    # so the command really is lost and the watchdog may fire again.
+    async def idle_capture(session_name: str) -> str:
+        return IDLE_PANE
+
+    monkeypatch.setattr(tmux_manager_module, "capture_pane", idle_capture)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert [p for _, p, _ in sent] == ["/compact", "continue"]
+
+
+async def test_min_interval_spaces_out_compactions(tmp_path: Path, monkeypatch) -> None:
+    """The operator-facing backstop: never two automatic compactions of one
+    session within the configured hour, even after the previous one
+    finished and the next turn is oversized again."""
+    mgr = _manager(tmp_path, default_tokens=220_000, min_interval_sec=3600)
+    key, _transcript, sent = _wire(
+        mgr,
+        tmp_path,
+        [
+            COMPACT_ENQUEUE_LINE,
+            COMPACT_BOUNDARY_LINE,
+            _assistant_line("a2", cached=240_000),
+        ],
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(tmux_manager_module.time, "time", lambda: ENQUEUE_UNIX + 20 * 60)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert sent == []
+
+    monkeypatch.setattr(tmux_manager_module.time, "time", lambda: ENQUEUE_UNIX + 61 * 60)
+    with patch.object(mgr, "_tmux_alive", return_value=True):
+        await mgr._check_channel_context(key)
+    assert [p for _, p, _ in sent] == ["/compact", "continue"]
+
+
+def test_pane_busy_markers() -> None:
+    assert tmux_manager_module._pane_busy(BUSY_PANE) is True
+    assert tmux_manager_module._pane_busy(RETRY_PANE) is True
+    assert tmux_manager_module._pane_busy(IDLE_PANE) is False
 
 
 def test_compact_boundary_supersedes_stale_usage(tmp_path: Path) -> None:

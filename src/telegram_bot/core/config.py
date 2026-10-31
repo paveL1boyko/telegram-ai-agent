@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     # override via `/autocompact <N>`.
     auto_compact_tokens: int = 220_000
     auto_compact_check_sec: float = 300.0
+    # Floor between two compactions of one session, counted from the newest
+    # `/compact` in its transcript whoever typed it. The pending gate
+    # (queued `/compact` without a compact_boundary yet) covers the normal
+    # case; this is the backstop for what it cannot see — a command edited
+    # out of the queue, a compaction that never wrote its boundary. 0
+    # disables.
+    auto_compact_min_interval_sec: float = 3600.0
     # After an automatic `/compact` the CLI idles at the prompt, so the
     # task in flight would stall. The bot sends this prompt to resume it:
     # right behind the compact on an idle session, or once the compaction
