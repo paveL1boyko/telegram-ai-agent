@@ -138,6 +138,34 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.sendfile_not_absolute": "⚠️ Use an absolute path (starting with /)",
         "ui.sendfile_too_big": "⚠️ File is too big: {size} MB (Telegram limit is 50 MB)",
         "ui.sendfile_failed": "⚠️ Failed to send the file: {error}",
+        "ui.filesdir_usage": (
+            "Usage:\n"
+            "• /filesdir &lt;absolute path&gt; [glob] — mirror matching files into"
+            " this topic (glob is a path pattern relative to the folder:"
+            " &lt;code&gt;*.md&lt;/code&gt; flat, &lt;code&gt;**/*.pdf&lt;/code&gt; recursive,"
+            " default — everything)\n"
+            "• /filesdir rm &lt;n&gt; — stop mirroring entry n\n"
+            "• /filesdir clear — stop mirroring everything\n\n"
+            "New and changed files upload automatically; /files syncs right now."
+        ),
+        "ui.filesdir_list_header": "Mirrored folders in this topic:",
+        "ui.filesdir_added": "📂 Now mirroring: {path}",
+        "ui.filesdir_removed_item": "Stopped mirroring: {path}",
+        "ui.filesdir_cleared": "Mirror cleared for this topic",
+        "ui.filesdir_not_found": "⚠️ Directory not found: {path}",
+        "ui.filesdir_already": "⚠️ Already mirrored: {path}",
+        "ui.filesdir_bad_index": "⚠️ No folder number {index}",
+        "ui.filesdir_too_many": (
+            "⚠️ These folders hold {count} files (limit is {limit}). Mirror a narrower folder."
+        ),
+        "ui.filesdir_write_failed": "⚠️ Failed to save the mirror settings",
+        "ui.files_no_dirs": (
+            "Nothing to sync — no mirrored folders. Add one with /filesdir &lt;absolute path&gt;."
+        ),
+        "ui.files_sync_done": ("✅ Synced: {posted} new, {updated} updated, {removed} removed"),
+        "ui.files_sync_failed": "⚠️ Sync failed: {error}",
+        "ui.files_caption_new": "🆕 new",
+        "ui.files_caption_updated": "🔄 updated {time}",
         "ui.model_no_presets": "⚠️ No model presets configured (MODEL_PRESETS)",
         "ui.model_not_in_forum": "⚠️ /model works only in forum topics",
         "ui.model_write_failed": "Failed to save model settings",
@@ -459,6 +487,37 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.sendfile_not_absolute": "⚠️ Нужен абсолютный путь (начинается с /)",
         "ui.sendfile_too_big": "⚠️ Файл слишком большой: {size} МБ (лимит Telegram — 50 МБ)",
         "ui.sendfile_failed": "⚠️ Не удалось отправить файл: {error}",
+        "ui.filesdir_usage": (
+            "Использование:\n"
+            "• /filesdir &lt;абсолютный путь&gt; [шаблон] — зеркалить подходящие файлы"
+            " в этот топик (шаблон — path-glob относительно папки:"
+            " &lt;code&gt;*.md&lt;/code&gt; только корень, &lt;code&gt;**/*.pdf&lt;/code&gt; с"
+            " вложенными, по умолчанию — всё)\n"
+            "• /filesdir rm &lt;n&gt; — перестать зеркалить запись n\n"
+            "• /filesdir clear — перестать зеркалить всё\n\n"
+            "Новые и изменённые файлы загружаются автоматически; /files синхронизирует сразу."
+        ),
+        "ui.filesdir_list_header": "Зеркалимые папки этого топика:",
+        "ui.filesdir_added": "📂 Теперь зеркалится: {path}",
+        "ui.filesdir_removed_item": "Зеркалирование остановлено: {path}",
+        "ui.filesdir_cleared": "Зеркалирование для топика выключено",
+        "ui.filesdir_not_found": "⚠️ Директория не найдена: {path}",
+        "ui.filesdir_already": "⚠️ Уже зеркалится: {path}",
+        "ui.filesdir_bad_index": "⚠️ Нет папки с номером {index}",
+        "ui.filesdir_too_many": (
+            "⚠️ В этих папках {count} файлов (лимит — {limit}). Выберите папку поуже."
+        ),
+        "ui.filesdir_write_failed": "⚠️ Не удалось сохранить настройки зеркала",
+        "ui.files_no_dirs": (
+            "Синхронизировать нечего — зеркалимых папок нет."
+            " Добавьте через /filesdir &lt;абсолютный путь&gt;."
+        ),
+        "ui.files_sync_done": (
+            "✅ Синхронизировано: новых {posted}, обновлено {updated}, удалено {removed}"
+        ),
+        "ui.files_sync_failed": "⚠️ Синхронизация не удалась: {error}",
+        "ui.files_caption_new": "🆕 новый",
+        "ui.files_caption_updated": "🔄 обновлён {time}",
         "ui.model_no_presets": "⚠️ Список моделей не настроен (MODEL_PRESETS)",
         "ui.model_not_in_forum": "⚠️ /model работает только внутри форум-топиков",
         "ui.model_write_failed": "Не удалось сохранить настройки модели",

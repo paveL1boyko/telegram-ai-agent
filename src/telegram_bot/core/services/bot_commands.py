@@ -65,6 +65,16 @@ PUBLIC_BOT_COMMANDS: tuple[LocalizedBotCommand, ...] = (
         "Отправить локальный файл в чат",
         "Send a file from disk to the chat",
     ),
+    LocalizedBotCommand(
+        "filesdir",
+        "Зеркалить папку диска в этот топик",
+        "Mirror a disk folder into this topic",
+    ),
+    LocalizedBotCommand(
+        "files",
+        "Синхронизировать файлы зеркала",
+        "Sync mirrored files now",
+    ),
     LocalizedBotCommand("resume", "Возобновить сохраненную сессию", "Resume a saved session"),
     LocalizedBotCommand("kill", "Остановить tmux-сессию", "Stop the tmux session"),
     LocalizedBotCommand(

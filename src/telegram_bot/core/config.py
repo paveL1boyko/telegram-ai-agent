@@ -106,6 +106,16 @@ class Settings(BaseSettings):
     # runs. Requires the bot to have the manage_topics admin right; rename
     # failures are logged and swallowed. Disable via TOPIC_AUTONAME=false.
     topic_autoname: bool = True
+    # File mirror: every file_sync_interval_sec the watchdog rescans folders
+    # attached to a topic via `/filesdir`, uploads new/changed files and
+    # deletes the Telegram copies of files that disappeared from disk. A file
+    # only uploads after two consecutive ticks see the same (mtime, size), so
+    # an agent still writing the file never ships a torn read. `/files`
+    # forces an immediate sync without that wait.
+    file_sync_interval_sec: float = 30.0
+    # Per-topic mirror state (message ids keyed by file path), relative to
+    # the working directory, like topic_config_path.
+    file_sync_state_dir: str = "./file_sync_state"
 
 
 @functools.lru_cache(maxsize=1)

@@ -102,11 +102,59 @@ class TopicSettings:
     # one of the forum icon emoji, otherwise a prefix of the auto-name. Edit
     # the string in topic_config.json by hand to re-badge a topic.
     emoji: str | None = None
+    # On-disk folders mirrored into this topic by the file-sync watchdog
+    # (see services/file_sync.py): each matching file inside is uploaded once
+    # and re-uploaded on change. Entries are {"dir": ..., "pattern": ...}
+    # where pattern is a pathlib glob relative to dir ("**/*" by default);
+    # a bare string entry is shorthand for the default pattern. None/empty
+    # = this topic is not a file mirror.
+    files_dirs: list[dict[str, str]] | None = None
 
 
 # An emoji with skin tone / ZWJ sequences stays well under this; anything
 # longer is a sentence, not a marker.
 _EMOJI_MAX_LEN = 16
+
+# Default glob of a mirror entry: every file under the folder, recursively.
+_FILES_DIR_DEFAULT_PATTERN = "**/*"
+
+
+def _normalize_files_dirs(
+    raw: object, *, thread_id: int | None = None
+) -> list[dict[str, str]] | None:
+    """Validate a files_dirs value from config or UI into mirror entries.
+
+    Each entry is {"dir": abs dir, "pattern": glob}; a bare string entry is
+    shorthand for the default pattern. Invalid entries are dropped with a
+    warning; an empty result means "no mirror" (None).
+    """
+    if not isinstance(raw, list):
+        return None
+    valid: list[dict[str, str]] = []
+    for raw_entry in raw:
+        if isinstance(raw_entry, str):
+            raw_entry = {"dir": raw_entry}
+        if not isinstance(raw_entry, dict):
+            logger.warning("Invalid files_dirs entry %r, dropping", raw_entry)
+            continue
+        raw_dir = raw_entry.get("dir")
+        if not isinstance(raw_dir, str) or not os.path.isabs(raw_dir) or not os.path.isdir(raw_dir):
+            logger.warning("files_dirs entry %r is not an existing directory, dropping", raw_dir)
+            continue
+        pattern = raw_entry.get("pattern")
+        if not isinstance(pattern, str) or not pattern.strip():
+            pattern = _FILES_DIR_DEFAULT_PATTERN
+        else:
+            pattern = pattern.strip()
+        if pattern.startswith(("/", "..")):
+            logger.warning(
+                "files_dirs pattern %r must be relative to the dir, dropping entry %r",
+                pattern,
+                raw_dir,
+            )
+            continue
+        valid.append({"dir": raw_dir, "pattern": pattern})
+    return valid or None
 
 
 def normalize_emoji(emoji: object) -> str | None:
@@ -323,6 +371,9 @@ class TopicConfig:
                 if raw_emoji is not None and emoji is None:
                     logger.warning("Invalid emoji %r for topic %d, dropping", raw_emoji, thread_id)
 
+                raw_files_dirs = value.get("files_dirs")
+                files_dirs = _normalize_files_dirs(raw_files_dirs, thread_id=thread_id)
+
                 topics[thread_id] = TopicSettings(
                     name=name,
                     type=topic_type,
@@ -335,6 +386,7 @@ class TopicConfig:
                     model=model,
                     auto_compact_tokens=auto_compact_tokens,
                     emoji=emoji,
+                    files_dirs=files_dirs,
                 )
 
         # Parse routing
@@ -504,6 +556,28 @@ class TopicConfig:
             field_name="cwd",
             value=cwd,
             log_label="update_cwd",
+        )
+
+    async def update_files_dirs(
+        self, thread_id: int, dirs: list[dict[str, str]] | list[str]
+    ) -> bool:
+        """Persist the file-mirror entries for one topic (empty = off).
+
+        Validation happens in `_normalize_files_dirs` — absolute + existing
+        directories and relative glob patterns — so a typo fails loudly
+        instead of silently disabling the mirror on the next read.
+        """
+        normalized = _normalize_files_dirs(dirs)
+        if dirs and len(normalized or []) != len(dirs):
+            # Strictly all-or-nothing: a partially valid list would silently
+            # drop a folder the user just added.
+            logger.warning("update_files_dirs: invalid entry in %r", dirs)
+            return False
+        return await self._update_topic_field(
+            thread_id=thread_id,
+            field_name="files_dirs",
+            value=normalized,
+            log_label="update_files_dirs",
         )
 
     async def update_auto_compact_tokens(self, thread_id: int, tokens: int | None) -> bool:

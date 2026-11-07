@@ -31,6 +31,7 @@ session_mapping.json
 channel_sessions.json
 tmux_sessions/
 data/
+file_sync_state/
 .codex/.sync/
 
 # User config

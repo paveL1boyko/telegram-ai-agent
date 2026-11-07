@@ -47,6 +47,10 @@ from telegram_bot.core.services.cwd_picker import (
     CwdPickerStore,
     list_subdirs,
 )
+from telegram_bot.core.services.file_sync import (
+    FileSyncService,
+    count_mirror_files,
+)
 from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.picker_store import PickerState, PickerStore
 from telegram_bot.core.services.providers import engine_display_name, get_adapter
@@ -1224,6 +1228,186 @@ async def handle_sendfile_command(message: Message, command: CommandObject) -> N
     except Exception as exc:
         logger.warning("sendfile failed for %s", raw_path, exc_info=True)
         await message.answer(t("ui.sendfile_failed", error=str(exc)[:200]))
+
+
+# Refuse mirroring folders that would flood the topic with uploads — the
+# user picks specific artifact folders (reports, plans), never a project
+# root full of sources.
+_FILES_MAX_MIRROR_FILES = 200
+
+_FILES_DIR_DEFAULT_PATTERN = "**/*"
+
+
+def _filesdir_split_path_pattern(args: str) -> tuple[str, str | None]:
+    """Split `/filesdir` args into (path, pattern | None).
+
+    The trailing space-separated token counts as a glob pattern only when
+    it contains wildcard characters and the rest is an existing directory —
+    so a path with spaces and no wildcard stays one path.
+    """
+    head, sep, tail = args.rpartition(" ")
+    if sep and ("*" in tail or "?" in tail or "[" in tail) and Path(head).expanduser().is_dir():
+        return head, tail
+    return args, None
+
+
+def _filesdir_entry_label(entry: dict[str, str]) -> str:
+    """One mirror entry as shown in the list: dir + non-default pattern."""
+    pattern = entry.get("pattern") or _FILES_DIR_DEFAULT_PATTERN
+    if pattern == _FILES_DIR_DEFAULT_PATTERN:
+        return entry["dir"]
+    return f"{entry['dir']} ({pattern})"
+
+
+@router.message(Command("filesdir"))
+async def handle_filesdir_command(
+    message: Message,
+    command: CommandObject,
+    topic_config: TopicConfig,
+    file_sync: FileSyncService,
+) -> None:
+    """Configure the file mirror of this topic.
+
+    Bare `/filesdir` lists the mirrored folders; `<absolute path> [glob]`
+    adds one (uploading everything immediately); `rm <n>` removes entry n;
+    `clear` disables the mirror. The pattern is a pathlib glob relative to
+    the folder (`*.md` — flat, `**/*.pdf` — recursive; default is
+    everything). The watchdog then keeps the mirror in sync automatically —
+    new/changed files upload, vanished files' messages are deleted.
+    """
+    _, thread_id = channel_key(message)
+    if thread_id is None:
+        await message.answer(t("ui.stream_mode_not_in_forum"))
+        return
+
+    args = (command.args or "").strip()
+    current = list(topic_config.get_topic(thread_id).files_dirs or [])
+
+    if not args:
+        if not current:
+            await message.answer(t("ui.filesdir_usage"), parse_mode="HTML")
+            return
+        lines = [t("ui.filesdir_list_header")]
+        lines.extend(
+            f"{idx}. {html.escape(_filesdir_entry_label(d))}"
+            for idx, d in enumerate(current, start=1)
+        )
+        lines.append("")
+        lines.append(t("ui.filesdir_usage"))
+        await message.answer("\n".join(lines), parse_mode="HTML")
+        return
+
+    lowered = args.lower()
+    if lowered == "clear":
+        if not await topic_config.update_files_dirs(thread_id, []):
+            await message.answer(t("ui.filesdir_write_failed"))
+            return
+        await message.answer(t("ui.filesdir_cleared"))
+        return
+
+    if lowered.startswith("rm "):
+        try:
+            index = int(args[3:].strip())
+        except ValueError:
+            index = -1
+        if not 1 <= index <= len(current):
+            await message.answer(
+                t("ui.filesdir_bad_index", index=html.escape(args[3:].strip())),
+                parse_mode="HTML",
+            )
+            return
+        removed = current.pop(index - 1)
+        if not await topic_config.update_files_dirs(thread_id, current):
+            await message.answer(t("ui.filesdir_write_failed"))
+            return
+        await message.answer(t("ui.filesdir_removed_item", path=_filesdir_entry_label(removed)))
+        return
+
+    raw_path, pattern = _filesdir_split_path_pattern(args)
+    raw_path = str(Path(raw_path).expanduser())
+    norm_pattern = (pattern or _FILES_DIR_DEFAULT_PATTERN).strip()
+    if not os.path.isabs(raw_path):
+        await message.answer(t("ui.sendfile_not_absolute"))
+        return
+    if not os.path.isdir(raw_path):
+        await message.answer(
+            t("ui.filesdir_not_found", path=html.escape(raw_path)), parse_mode="HTML"
+        )
+        return
+    if any(
+        e["dir"] == raw_path and e.get("pattern", _FILES_DIR_DEFAULT_PATTERN) == norm_pattern
+        for e in current
+    ):
+        await message.answer(
+            t("ui.filesdir_already", path=html.escape(f"{raw_path} ({norm_pattern})")),
+            parse_mode="HTML",
+        )
+        return
+
+    new_entries = [*current, {"dir": raw_path, "pattern": norm_pattern}]
+    total = count_mirror_files(new_entries)
+    if total > _FILES_MAX_MIRROR_FILES:
+        await message.answer(t("ui.filesdir_too_many", count=total, limit=_FILES_MAX_MIRROR_FILES))
+        return
+
+    if not await topic_config.update_files_dirs(thread_id, new_entries):
+        await message.answer(t("ui.filesdir_write_failed"))
+        return
+    # Initial sync right away so the topic shows its files without waiting
+    # for the watchdog's stability delay.
+    try:
+        result = await file_sync.sync_topic(message.chat.id, thread_id, new_entries, force=True)
+    except Exception as exc:
+        logger.warning("filesdir initial sync failed", exc_info=True)
+        await message.answer(
+            t("ui.filesdir_added", path=html.escape(_filesdir_entry_label(new_entries[-1])))
+            + "\n"
+            + t("ui.files_sync_failed", error=str(exc)[:200]),
+            parse_mode="HTML",
+        )
+        return
+    await message.answer(
+        t("ui.filesdir_added", path=html.escape(_filesdir_entry_label(new_entries[-1])))
+        + "\n"
+        + t(
+            "ui.files_sync_done",
+            posted=result.posted,
+            updated=result.updated,
+            removed=result.removed,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("files"))
+async def handle_files_command(
+    message: Message,
+    topic_config: TopicConfig,
+    file_sync: FileSyncService,
+) -> None:
+    """Sync this topic's file mirror right now, without the stability wait."""
+    _, thread_id = channel_key(message)
+    if thread_id is None:
+        await message.answer(t("ui.stream_mode_not_in_forum"))
+        return
+    dirs = list(topic_config.get_topic(thread_id).files_dirs or [])
+    if not dirs:
+        await message.answer(t("ui.files_no_dirs"), parse_mode="HTML")
+        return
+    try:
+        result = await file_sync.sync_topic(message.chat.id, thread_id, dirs, force=True)
+    except Exception as exc:
+        logger.warning("files sync failed", exc_info=True)
+        await message.answer(t("ui.files_sync_failed", error=str(exc)[:200]))
+        return
+    await message.answer(
+        t(
+            "ui.files_sync_done",
+            posted=result.posted,
+            updated=result.updated,
+            removed=result.removed,
+        )
+    )
 
 
 async def _restart_session_for_new_cwd(

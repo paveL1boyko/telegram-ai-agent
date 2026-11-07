@@ -19,6 +19,7 @@ codebase each time.
 | Per-topic persisted config | `src/telegram_bot/core/services/topic_config.py` |
 | Engine adapters (Claude/Codex specifics) | `src/telegram_bot/core/services/providers.py` |
 | tmux session lifecycle | `src/telegram_bot/core/services/tmux_manager.py` |
+| File mirror (folder → topic sync) | `src/telegram_bot/core/services/file_sync.py` |
 | Agent → Telegram sends (MCP server) | `mcp-servers/bot/server.py` |
 | Per-session MCP config generation | `src/telegram_bot/core/services/bot_mcp_runtime.py` |
 
@@ -99,6 +100,35 @@ without a session, once per process on their first text message
 Pinning topics in a fixed order is not possible through the Bot API — there is
 no pin/reorder method for forum topics (only `pinChatMessage` for messages);
 "Pin topic" exists solely in the Telegram client UI for group admins.
+
+## File mirror: `/filesdir` and `/files`
+
+A topic can mirror on-disk folders: every matching file is uploaded to the
+topic once, re-uploaded when it changes, and its message deleted when the
+file disappears (documents cannot be edited via the Bot API, so "update" is
+always send-new-then-delete-old — never the reverse, a failed send loses
+nothing). Run the commands **in the target topic**; the mirrored folder can
+belong to any other topic's session cwd.
+
+- `/filesdir <absolute path> [glob]` — add a mirror entry and upload
+  everything matching immediately. The glob is a path pattern relative to
+  the folder (`*.md` flat, `**/*.pdf` recursive, default `**/*`); a trailing
+  token counts as a glob only when it has wildcard chars and the head is an
+  existing directory, so paths with spaces survive. Entries with more than
+  `200` matching files are refused up front.
+- `/filesdir` — list the topic's entries; `/filesdir rm <n>` removes one;
+  `/filesdir clear` disables the mirror.
+- `/files` — sync right now, without the stability wait.
+
+Persistence: entries live in `topic_config.json` (`files_dirs`, a list of
+`{"dir", "pattern"}` objects — a bare string is shorthand for the default
+pattern); per-topic message-id state lives in `file_sync_state/<thread>.json`,
+which also records the chat id — the watchdog only knows thread ids, so a
+mirror added by hand-editing the config posts nothing until `/files` runs
+in the topic once. The watchdog ticks every `FILE_SYNC_INTERVAL_SEC` (30s;
+`0` disables it — `/files` keeps working) and uploads a file only after two
+consecutive ticks see the same `(mtime, size)`, so an agent mid-write never
+ships a torn read.
 
 ## Typing directly into the tmux pane
 

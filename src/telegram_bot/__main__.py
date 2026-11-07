@@ -33,6 +33,7 @@ from telegram_bot.core.middleware.auth import AuthMiddleware
 from telegram_bot.core.services.bot_commands import setup_bot_commands
 from telegram_bot.core.services.claude import SessionManager
 from telegram_bot.core.services.cwd_picker import CwdPickerStore
+from telegram_bot.core.services.file_sync import FileSyncService
 from telegram_bot.core.services.message_queue import MessageQueue
 from telegram_bot.core.services.picker_store import PickerStore
 from telegram_bot.core.services.tmux_manager import TmuxManager
@@ -140,6 +141,14 @@ async def _start() -> None:
         continue_prompt=settings.auto_compact_continue_prompt,
         min_interval_sec=settings.auto_compact_min_interval_sec,
     )
+    file_sync = FileSyncService(
+        bot=bot,
+        topic_config=topic_config,
+        state_dir=Path(settings.project_root) / settings.file_sync_state_dir,
+    )
+    # 0 disables the auto-sync watchdog — `/files` keeps working on demand.
+    if settings.file_sync_interval_sec > 0:
+        file_sync.start(settings.file_sync_interval_sec)
     transcriber = Transcriber(settings)
     forward_batcher = ForwardBatcher(bot=bot)
 
@@ -196,6 +205,7 @@ async def _start() -> None:
     dp["tmux_manager"] = tmux_manager
     dp["picker_store"] = PickerStore()
     dp["cwd_picker_store"] = CwdPickerStore()
+    dp["file_sync"] = file_sync
     bot_defaults = BotDefaults(
         cwd=default_cwd,
         mcp_config=Path(settings.project_root) / ".mcp.bot.json",
@@ -249,6 +259,7 @@ async def _start() -> None:
         cleanup_task.cancel()
         if topic_sync_task is not None:
             topic_sync_task.cancel()
+        await file_sync.stop()
         await forward_batcher.shutdown()
         await message_queue.shutdown()
         await session_manager.shutdown()
