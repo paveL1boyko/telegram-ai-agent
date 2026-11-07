@@ -159,68 +159,99 @@ class FileSyncService:
 
         force=True uploads immediately without the two-tick stability wait
         (manual `/files`, first `/filesdir`); the watchdog passes force=False.
+        Uploads go in sorted path order, so zero-padded names
+        (00-report.md, 01-plan.md …) land in the topic by number.
+        """
+        lock = self._locks.setdefault(thread_id, asyncio.Lock())
+        async with lock:
+            return await self._sync_locked(chat_id, thread_id, entries, force=force)
+
+    async def rebuild_topic(
+        self, chat_id: int, thread_id: int, entries: list[dict[str, str]]
+    ) -> SyncResult:
+        """Delete every tracked message and re-upload all files in sorted order.
+
+        Telegram cannot reorder existing messages, so an updated file always
+        lands at the bottom of the topic. This is the manual "re-sort":
+        clear the mirror and rebuild it — `/files resort`.
         """
         lock = self._locks.setdefault(thread_id, asyncio.Lock())
         async with lock:
             state = self._load_state(thread_id)
             files_raw = state.get("files")
-            files: dict[str, dict[str, int]] = (
-                dict(files_raw) if isinstance(files_raw, dict) else {}
-            )
-            pending_raw = state.get("pending")
-            pending: dict[str, list[int]] = (
-                dict(pending_raw) if isinstance(pending_raw, dict) else {}
-            )
-            state["files"] = files
-            state["pending"] = pending
-            state["chat_id"] = chat_id
-
-            snapshot = scan_mirror_files(entries)
-            result = SyncResult()
-
-            for path, (mtime_ns, size) in snapshot.items():
-                entry = files.get(path)
-                entry_sig = (entry["mtime_ns"], entry["size"]) if entry else None
-                if entry_sig == (mtime_ns, size):
-                    pending.pop(path, None)
-                    continue
-                if not force and pending.get(path) != [mtime_ns, size]:
-                    # First sighting of this content — wait one more tick
-                    # so a file mid-write never ships torn.
-                    pending[path] = [mtime_ns, size]
-                    continue
-                pending.pop(path, None)
-                if entry is None:
-                    msg_id = await self._send_file(chat_id, thread_id, path, updated=False)
-                    if msg_id is not None:
-                        files[path] = {"mtime_ns": mtime_ns, "size": size, "msg_id": msg_id}
-                        result.posted += 1
-                else:
-                    # Send first, delete after — a failed send must not
-                    # lose the previous copy.
-                    msg_id = await self._send_file(chat_id, thread_id, path, updated=True)
-                    if msg_id is not None:
+            if isinstance(files_raw, dict):
+                for entry in files_raw.values():
+                    if isinstance(entry, dict) and isinstance(entry.get("msg_id"), int):
                         await self._delete_message(chat_id, entry["msg_id"])
-                        files[path] = {"mtime_ns": mtime_ns, "size": size, "msg_id": msg_id}
-                        result.updated += 1
-
-            for path in [p for p in files if p not in snapshot]:
-                await self._delete_message(chat_id, files[path]["msg_id"])
-                del files[path]
-                result.removed += 1
-            for path in [p for p in pending if p not in snapshot]:
-                del pending[path]
-
+            state["files"] = {}
+            state["pending"] = {}
             self._save_state(thread_id, state)
-            if result.posted or result.updated or result.removed:
-                logger.info(
-                    "File sync topic %d: %d posted, %d updated, %d removed",
-                    thread_id,
-                    result.posted,
-                    result.updated,
-                    result.removed,
-                )
-            return result
+            return await self._sync_locked(chat_id, thread_id, entries, force=True)
+
+    async def _sync_locked(
+        self,
+        chat_id: int,
+        thread_id: int,
+        entries: list[dict[str, str]],
+        *,
+        force: bool,
+    ) -> SyncResult:
+        """Sync core — the caller already holds the per-topic lock."""
+        state = self._load_state(thread_id)
+        files_raw = state.get("files")
+        files: dict[str, dict[str, int]] = dict(files_raw) if isinstance(files_raw, dict) else {}
+        pending_raw = state.get("pending")
+        pending: dict[str, list[int]] = dict(pending_raw) if isinstance(pending_raw, dict) else {}
+        state["files"] = files
+        state["pending"] = pending
+        state["chat_id"] = chat_id
+
+        snapshot = scan_mirror_files(entries)
+        result = SyncResult()
+
+        for path, (mtime_ns, size) in sorted(snapshot.items()):
+            entry = files.get(path)
+            entry_sig = (entry["mtime_ns"], entry["size"]) if entry else None
+            if entry_sig == (mtime_ns, size):
+                pending.pop(path, None)
+                continue
+            if not force and pending.get(path) != [mtime_ns, size]:
+                # First sighting of this content — wait one more tick
+                # so a file mid-write never ships torn.
+                pending[path] = [mtime_ns, size]
+                continue
+            pending.pop(path, None)
+            if entry is None:
+                msg_id = await self._send_file(chat_id, thread_id, path, updated=False)
+                if msg_id is not None:
+                    files[path] = {"mtime_ns": mtime_ns, "size": size, "msg_id": msg_id}
+                    result.posted += 1
+            else:
+                # Send first, delete after — a failed send must not
+                # lose the previous copy.
+                msg_id = await self._send_file(chat_id, thread_id, path, updated=True)
+                if msg_id is not None:
+                    await self._delete_message(chat_id, entry["msg_id"])
+                    files[path] = {"mtime_ns": mtime_ns, "size": size, "msg_id": msg_id}
+                    result.updated += 1
+
+        for path in [p for p in files if p not in snapshot]:
+            await self._delete_message(chat_id, files[path]["msg_id"])
+            del files[path]
+            result.removed += 1
+        for path in [p for p in pending if p not in snapshot]:
+            del pending[path]
+
+        self._save_state(thread_id, state)
+        if result.posted or result.updated or result.removed:
+            logger.info(
+                "File sync topic %d: %d posted, %d updated, %d removed",
+                thread_id,
+                result.posted,
+                result.updated,
+                result.removed,
+            )
+        return result
 
     # -- Telegram plumbing -------------------------------------------------
 

@@ -163,6 +163,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Nothing to sync — no mirrored folders. Add one with /filesdir &lt;absolute path&gt;."
         ),
         "ui.files_sync_done": ("✅ Synced: {posted} new, {updated} updated, {removed} removed"),
+        "ui.files_resort_done": "🔄 Mirror rebuilt in sorted order: {posted} files",
         "ui.files_sync_failed": "⚠️ Sync failed: {error}",
         "ui.files_caption_new": "🆕 new",
         "ui.files_caption_updated": "🔄 updated {time}",
@@ -515,6 +516,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.files_sync_done": (
             "✅ Синхронизировано: новых {posted}, обновлено {updated}, удалено {removed}"
         ),
+        "ui.files_resort_done": "🔄 Зеркало пересобрано по порядку: файлов — {posted}",
         "ui.files_sync_failed": "⚠️ Синхронизация не удалась: {error}",
         "ui.files_caption_new": "🆕 новый",
         "ui.files_caption_updated": "🔄 обновлён {time}",

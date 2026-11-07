@@ -1382,10 +1382,16 @@ async def handle_filesdir_command(
 @router.message(Command("files"))
 async def handle_files_command(
     message: Message,
+    command: CommandObject,
     topic_config: TopicConfig,
     file_sync: FileSyncService,
 ) -> None:
-    """Sync this topic's file mirror right now, without the stability wait."""
+    """Sync this topic's file mirror right now, without the stability wait.
+
+    `/files resort` additionally deletes every tracked message and
+    re-uploads all files in sorted order — Telegram cannot reorder existing
+    messages, so an updated file otherwise lands at the bottom of the topic.
+    """
     _, thread_id = channel_key(message)
     if thread_id is None:
         await message.answer(t("ui.stream_mode_not_in_forum"))
@@ -1395,6 +1401,10 @@ async def handle_files_command(
         await message.answer(t("ui.files_no_dirs"), parse_mode="HTML")
         return
     try:
+        if (command.args or "").strip().lower() == "resort":
+            result = await file_sync.rebuild_topic(message.chat.id, thread_id, dirs)
+            await message.answer(t("ui.files_resort_done", posted=result.posted))
+            return
         result = await file_sync.sync_topic(message.chat.id, thread_id, dirs, force=True)
     except Exception as exc:
         logger.warning("files sync failed", exc_info=True)

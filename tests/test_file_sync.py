@@ -139,6 +139,54 @@ async def test_new_file_needs_two_ticks_then_uploads(tmp_path: Path) -> None:
     assert len(bot.sent) == 1
 
 
+async def test_uploads_go_in_sorted_path_order(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    _write(docs / "10-тёплый-пол.md", "c")
+    _write(docs / "00-паспорт.md", "a")
+    _write(docs / "02-балка.md", "b")
+    _write(docs / "sub" / "05-план.pdf", "d")
+
+    service = _make_service(tmp_path)
+    r = await service.sync_topic(1, 42, [{"dir": str(docs), "pattern": "**/*"}], force=True)
+    assert r.posted == 4
+    names = [str(Path(s["path"]).relative_to(docs)) for s in service._bot.sent]
+    assert (
+        names
+        == sorted(names)
+        == [
+            "00-паспорт.md",
+            "02-балка.md",
+            "10-тёплый-пол.md",
+            "sub/05-план.pdf",
+        ]
+    )
+
+
+async def test_rebuild_deletes_all_and_reuploads_sorted(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    _write(docs / "02-балка.md", "b")
+    _write(docs / "00-паспорт.md", "a")
+
+    service = _make_service(tmp_path)
+    bot = service._bot
+    entries = [{"dir": str(docs), "pattern": "*.md"}]
+    await service.sync_topic(1, 42, entries, force=True)
+    old_ids = {
+        e["msg_id"]
+        for e in json.loads((tmp_path / "state" / "42.json").read_text())["files"].values()
+    }
+    assert len(old_ids) == 2
+
+    # An update lands at the bottom — resort rebuilds the whole mirror.
+    _write(docs / "00-паспорт.md", "a2")
+    result = await service.rebuild_topic(1, 42, entries)
+    assert result.posted == 2
+    # Both old messages deleted, both files re-sent in sorted order.
+    assert {msg_id for _, msg_id in bot.deleted} == old_ids
+    names = [Path(s["path"]).name for s in bot.sent[-result.posted :]]
+    assert names == ["00-паспорт.md", "02-балка.md"]
+
+
 async def test_force_uploads_without_stability_wait(tmp_path: Path) -> None:
     docs = tmp_path / "docs"
     _write(docs / "a.md", "# a")
