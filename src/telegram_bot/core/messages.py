@@ -288,9 +288,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.btn_cancel": "Cancel ❌",
         "ui.btn_tui": "TUI 🖥",
         "ui.btn_model": "Model 🤖",
-        "ui.btn_compact": "Compact 🗜",
+        "ui.btn_continue": "Continue ▶",
         "ui.btn_cwd": "cwd 📁",
         # --- CC content prefixes (injected into prompts) --------------
+        # Canned prompt of the Продолжай/Continue reply-keyboard button —
+        # the exact phrase the user wants sent, so it is Russian in both
+        # locales (ru falls back to en for cc.* keys by design).
+        "cc.continue_prompt": "продолжай саму команду",
         "cc.voice_transcript_short": "[Voice, transcription]:",
         "cc.voice_failed_full": "[Voice message: failed to transcribe]",
         "cc.voice_too_large": "[Voice message: file too large]",
@@ -639,9 +643,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ui.btn_cancel": "Отменить ❌",
         "ui.btn_tui": "TUI 🖥",
         "ui.btn_model": "Модель 🤖",
-        "ui.btn_compact": "Compact 🗜",
+        "ui.btn_continue": "Продолжай",
         "ui.btn_cwd": "cwd 📁",
         # CC content prefixes are intentionally English-only — see MESSAGES["en"].
+        # cc.continue_prompt is the exception: the Продолжай-button canned
+        # prompt stays Russian in both locales, so it lives in en only and
+        # ru falls back to it unchanged.
         # --- Queue messages -------------------------------------------
         "ui.queue_added_batch": "Добавлено в батч, он №{position} в очереди",
         "ui.queue_added": "Добавлено в очередь (№{position})",

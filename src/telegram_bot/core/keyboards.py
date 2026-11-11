@@ -21,13 +21,15 @@ CWD_PAGE_SIZE = 8
 
 
 def topic_keyboard() -> ReplyKeyboardMarkup:
-    """Reply keyboard with new chat, cancel, model/cwd and compact/TUI shortcuts.
+    """Reply keyboard with new chat, cancel, model/cwd and continue/TUI shortcuts.
     Each button sends its i18n text (e.g. `t("ui.btn_tui")` → "TUI 🖥"); a
-    `F.text == t("ui.btn_*")` handler listens for that exact text and runs
-    the matching slash command (`/tui`, `/model`, `/compact`, bare `/cwd`),
-    so the user gets the same result with one keyboard tap. TUI sits on the
-    bottom row: it is the rarest tap and the one most often hit by accident
-    when the keyboard is reached for."""
+    `F.text == t("ui.btn_*")` handler listens for that exact text and acts
+    on it — pickers open their slash command (`/tui`, `/model`, bare
+    `/cwd`), while Продолжай sends the canned continue prompt to the
+    session like a typed chat message, so the user gets the same result
+    with one keyboard tap. TUI sits on the bottom row: it is the rarest
+    tap and the one most often hit by accident when the keyboard is
+    reached for."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -39,7 +41,7 @@ def topic_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text=t("ui.btn_cwd")),
             ],
             [
-                KeyboardButton(text=t("ui.btn_compact")),
+                KeyboardButton(text=t("ui.btn_continue")),
                 KeyboardButton(text=t("ui.btn_tui")),
             ],
         ],

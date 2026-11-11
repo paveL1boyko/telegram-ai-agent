@@ -27,7 +27,10 @@ from aiogram.types.inaccessible_message import InaccessibleMessage
 from telegram_bot.core.config import Settings
 from telegram_bot.core.handlers._dispatch import enqueue_prompt
 from telegram_bot.core.handlers.forward import ForwardBatcher
-from telegram_bot.core.handlers.streaming import send_to_tmux_if_active
+from telegram_bot.core.handlers.streaming import (
+    ensure_exec_mode_ready,
+    send_to_tmux_if_active,
+)
 from telegram_bot.core.keyboards import (
     RESUME_PAGE_SIZE,
     _format_age,
@@ -329,15 +332,35 @@ async def handle_compact_command(
     await _compact_session(message, message_queue, tmux_manager, topic_config)
 
 
-@router.message(F.text == t("ui.btn_compact"))
-async def handle_compact_button(
+@router.message(F.text == t("ui.btn_continue"))
+async def handle_continue_button(
     message: Message,
+    session_manager: SessionManager,
     message_queue: MessageQueue,
     tmux_manager: TmuxManager,
     topic_config: TopicConfig,
 ) -> None:
-    """Reply-keyboard Compact button — same as /compact."""
-    await _compact_session(message, message_queue, tmux_manager, topic_config)
+    """Reply-keyboard Продолжай button — sends the canned continue prompt.
+
+    Behaves exactly like the user typing `cc.continue_prompt` in the chat:
+    straight into the live TUI when a tail runs, otherwise through the
+    MessageQueue (which also covers subprocess mode). No reply-context
+    injection — the canned prompt is the whole message."""
+    key = channel_key(message)
+    prompt = t("cc.continue_prompt")
+    if not await ensure_exec_mode_ready(key, topic_config, tmux_manager, session_manager, message):
+        return
+    if await send_to_tmux_if_active(key, prompt, message, tmux_manager):
+        return
+    enqueue_prompt(
+        key,
+        prompt,
+        message,
+        message_queue,
+        tmux_manager,
+        target_session_id=None,
+        inject_reply_if_no_target=False,
+    )
 
 
 async def _compact_session(
